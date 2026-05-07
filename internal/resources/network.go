@@ -33,6 +33,7 @@ type NetworkResourceModel struct {
 	DHCPStart       types.String `tfsdk:"dhcp_start"`
 	DHCPEnd         types.String `tfsdk:"dhcp_end"`
 	IGMPSnoopEnable types.Bool   `tfsdk:"igmp_snoop_enable"`
+	LanInterfaceIds types.List   `tfsdk:"lan_interface_ids"`
 }
 
 func NewNetworkResource() resource.Resource {
@@ -94,6 +95,12 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional:    true,
 				Computed:    true,
 			},
+			"lan_interface_ids": schema.ListAttribute{
+				Description: "List of gateway LAN interface IDs the network is bound to. Required when purpose='interface' and a gateway is adopted; without it the controller returns API error -33515 (\"LAN interfaces could not be none\"). Maps to the controller's 'interfaceIds' API field.",
+				Optional:    true,
+				Computed:    true,
+				ElementType: types.StringType,
+			},
 		},
 	}
 }
@@ -139,6 +146,14 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 			IPAddrEnd:   plan.DHCPEnd.ValueString(),
 		}
 	}
+	if !plan.LanInterfaceIds.IsNull() && !plan.LanInterfaceIds.IsUnknown() {
+		var ids []string
+		resp.Diagnostics.Append(plan.LanInterfaceIds.ElementsAs(ctx, &ids, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		network.InterfaceIds = ids
+	}
 
 	created, err := r.client.CreateNetwork(ctx, siteID, network)
 	if err != nil {
@@ -149,6 +164,9 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 	plan.ID = types.StringValue(created.ID)
 	plan.Purpose = types.StringValue(created.Purpose)
 	plan.IGMPSnoopEnable = types.BoolValue(created.IGMPSnoopEnable)
+	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, created.InterfaceIds)
+	resp.Diagnostics.Append(diag...)
+	plan.LanInterfaceIds = ifaceIDs
 
 	if created.Purpose == "vlan" {
 		plan.GatewaySubnet = types.StringNull()
@@ -190,6 +208,9 @@ func (r *NetworkResource) Read(ctx context.Context, req resource.ReadRequest, re
 	state.Purpose = types.StringValue(network.Purpose)
 	state.VlanID = types.Int64Value(int64(network.Vlan))
 	state.IGMPSnoopEnable = types.BoolValue(network.IGMPSnoopEnable)
+	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, network.InterfaceIds)
+	resp.Diagnostics.Append(diag...)
+	state.LanInterfaceIds = ifaceIDs
 
 	if network.Purpose == "vlan" {
 		state.GatewaySubnet = types.StringNull()
@@ -245,6 +266,14 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 			IPAddrEnd:   plan.DHCPEnd.ValueString(),
 		}
 	}
+	if !plan.LanInterfaceIds.IsNull() && !plan.LanInterfaceIds.IsUnknown() {
+		var ids []string
+		resp.Diagnostics.Append(plan.LanInterfaceIds.ElementsAs(ctx, &ids, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		network.InterfaceIds = ids
+	}
 
 	updated, err := r.client.UpdateNetwork(ctx, siteID, state.ID.ValueString(), network)
 	if err != nil {
@@ -256,6 +285,9 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 	plan.SiteID = state.SiteID
 	plan.Purpose = types.StringValue(updated.Purpose)
 	plan.IGMPSnoopEnable = types.BoolValue(updated.IGMPSnoopEnable)
+	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, updated.InterfaceIds)
+	resp.Diagnostics.Append(diag...)
+	plan.LanInterfaceIds = ifaceIDs
 
 	if updated.Purpose == "vlan" {
 		plan.GatewaySubnet = types.StringNull()
@@ -308,6 +340,9 @@ func (r *NetworkResource) ImportState(ctx context.Context, req resource.ImportSt
 		return
 	}
 
+	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, network.InterfaceIds)
+	resp.Diagnostics.Append(diag...)
+
 	state := NetworkResourceModel{
 		ID:              types.StringValue(network.ID),
 		SiteID:          types.StringValue(siteID),
@@ -315,6 +350,7 @@ func (r *NetworkResource) ImportState(ctx context.Context, req resource.ImportSt
 		Purpose:         types.StringValue(network.Purpose),
 		VlanID:          types.Int64Value(int64(network.Vlan)),
 		IGMPSnoopEnable: types.BoolValue(network.IGMPSnoopEnable),
+		LanInterfaceIds: ifaceIDs,
 	}
 
 	if network.Purpose == "vlan" {
