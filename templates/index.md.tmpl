@@ -1,0 +1,34 @@
+---
+page_title: "{{.ProviderShortName}} Provider"
+subcategory: ""
+description: |-
+  Terraform provider for managing TP-Link Omada Software Controller 6.x resources.
+---
+
+# {{.ProviderShortName}} Provider
+
+The Omada provider enables Terraform to manage resources on a [TP-Link Omada Software Controller](https://www.tp-link.com/us/omada-sdn/) running version 6.x.
+
+It supports managing sites, networks (VLANs), wireless networks (SSIDs), WLAN groups, switch port profiles, and device configurations for APs and managed switches.
+
+## Authentication
+
+The provider requires the URL, username, and password for your Omada Controller. These can be set via provider attributes or environment variables:
+
+| Attribute | Environment Variable |
+|---|---|
+| `url` | `OMADA_URL` |
+| `username` | `OMADA_USERNAME` |
+| `password` | `OMADA_PASSWORD` |
+| `site` | `OMADA_SITE` |
+| `skip_tls_verify` | `OMADA_SKIP_TLS_VERIFY` |
+
+## Site Configuration
+
+The `site` attribute is optional. When set, all site-scoped operations (networks, SSIDs, devices, etc.) use that site. When omitted, global operations like listing sites still work, and site-scoped operations will use the "Default" site.
+
+## Example Usage
+
+{{tffile "examples/provider/provider.tf"}}
+
+{{ .SchemaMarkdown | trimspace }}

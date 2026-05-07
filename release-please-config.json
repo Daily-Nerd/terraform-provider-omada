@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "go",
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "package-name": "terraform-provider-omada",
+      "changelog-path": "CHANGELOG.md"
+    }
+  }
+}

@@ -1,0 +1,33 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+.terraform.lock.hcl
+
+# Binary
+terraform-provider-omada
+terraform-provider-tplink-omada
+
+# macOS
+.DS_Store
+
+# IaC (separate repo)
+iac/
+
+# Test configs (local-only)
+test-*/
+
+# Go
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

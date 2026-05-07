@@ -1,0 +1,20 @@
+terraform-provider-omada
+Copyright (c) 2026 Daily-Nerd contributors
+
+This product is a fork of:
+  terraform-provider-tplink-omada
+  Copyright (c) 2026 Emanuel Besliu and contributors
+  https://github.com/emanuelbesliu/terraform-provider-tplink-omada
+
+The upstream project does not include an explicit LICENSE file. We forked it
+under the implicit license granted by GitHub Terms of Service section D.5,
+which permits viewing and forking of public repositories.
+
+All modifications made by Daily-Nerd contributors after the fork point
+(upstream tag v2.1.1, commit 9398b07, 2026-04-09) are licensed under the
+Mozilla Public License 2.0 (see LICENSE).
+
+The original code retains its upstream copyright. If the upstream maintainer
+adds an explicit license at any future date, this NOTICE will be updated
+accordingly and the licensing of the unmodified upstream portions will be
+brought into alignment with that license.

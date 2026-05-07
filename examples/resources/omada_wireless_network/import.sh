@@ -1,0 +1,2 @@
+# Import by wlan_group_id/ssid_id
+terraform import omada_wireless_network.example 696a40fd49039e1d13a9c412/696a419049039e1d13a9c4d3
