@@ -121,6 +121,11 @@ type Network struct {
 	DHCPSettings    *DHCPSettings `json:"dhcpSettings,omitempty"`
 	Isolation       bool          `json:"isolation"`
 	IGMPSnoopEnable bool          `json:"igmpSnoopEnable"`
+
+	// InterfaceIds binds the network to one or more gateway LAN interfaces.
+	// Required by the controller for purpose=interface networks once a
+	// gateway is adopted; absence triggers API error -33515.
+	InterfaceIds []string `json:"interfaceIds,omitempty"`
 }
 
 // WlanGroup represents a wireless LAN group.
