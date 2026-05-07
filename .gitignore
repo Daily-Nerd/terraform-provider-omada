@@ -31,3 +31,9 @@ test-*/
 .vscode/
 *.swp
 *.swo
+
+# Discovery 
+dist/api-discovery/
+
+# API discovery dumps
+dist/
