@@ -2,6 +2,13 @@
 
 > **Fork point.** This changelog continues from `emanuelbesliu/terraform-provider-tplink-omada` v2.1.1. The Daily-Nerd fork resets versioning to `0.x.y` to signal a different lineage. Upstream history is preserved below for reference.
 
+## 1.0.0 (2026-05-07)
+
+
+### Features
+
+* initial fork from emanuelbesliu/terraform-provider-tplink-omada v2.1.1 ([5a31cc7](https://github.com/Daily-Nerd/terraform-provider-omada/commit/5a31cc7f9abd4f33939689765d93d7f17bc56d42))
+
 ## [Unreleased] — Daily-Nerd fork
 
 ### Added
