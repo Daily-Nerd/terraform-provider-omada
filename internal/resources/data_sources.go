@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
 )
 
 var _ datasource.DataSource = &NetworksDataSource{}
