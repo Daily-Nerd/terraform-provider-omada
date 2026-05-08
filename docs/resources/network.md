@@ -40,7 +40,7 @@ resource "omada_network" "example" {
 - `dhcp_end` (String) The end of the DHCP range. Only applicable when DHCP is enabled.
 - `dhcp_start` (String) The start of the DHCP range. Only applicable when DHCP is enabled.
 - `gateway_subnet` (String) The gateway IP and subnet in CIDR notation (e.g., '192.168.0.1/24'). Only applicable for 'interface' purpose networks.
-- `igmp_snoop_enable` (Boolean) Enable IGMP snooping on this network.
+- `igmp_snoop_enable` (Boolean) Enable IGMP snooping on this network. The Omada controller treats this field as required at the API level (returns -1001 if omitted), but the provider sends `false` as the default zero value, so omitting it from Terraform config is safe. If you ever change the underlying Go type to a pointer, you must also send a default value to avoid breaking creates.
 - `purpose` (String) The purpose of the network ('interface' for gateway networks, 'vlan' for VLAN-only).
 
 ### Read-Only

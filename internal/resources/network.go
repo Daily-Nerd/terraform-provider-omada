@@ -91,7 +91,7 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed:    true,
 			},
 			"igmp_snoop_enable": schema.BoolAttribute{
-				Description: "Enable IGMP snooping on this network.",
+				Description: "Enable IGMP snooping on this network. The Omada controller treats this field as required at the API level (returns -1001 if omitted), but the provider sends `false` as the default zero value, so omitting it from Terraform config is safe. If you ever change the underlying Go type to a pointer, you must also send a default value to avoid breaking creates.",
 				Optional:    true,
 				Computed:    true,
 			},
