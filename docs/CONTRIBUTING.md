@@ -159,6 +159,16 @@ Probes how the controller validates `omada_network` payloads — useful for unde
 ./scripts/test-network-create.sh
 ```
 
+### `scripts/audit-network-schema.sh`
+
+Systematically tests each `omada_network` field by omitting it from a known-good payload and recording the controller's response. Output: `dist/audit/network-schema-report.{tsv,json}`.
+
+```bash
+./scripts/audit-network-schema.sh
+```
+
+Use this when you suspect a field marked `Optional` is actually required by the API. Last run found `igmpSnoopEnable` is the only such field; all others are truly optional.
+
 ---
 
 ## Commit conventions
