@@ -2329,3 +2329,54 @@ func (c *Client) GetControllerCertificateSetting(ctx context.Context) (*Controll
 
 	return &setting, nil
 }
+
+// ============================================================================
+// Gateway Ports
+// ============================================================================
+//
+// Gateway port info is exposed via /setting/wan/networks. Each port has a
+// stable UUID that can be passed to omada_network's interfaceIds field to
+// bind a network to that physical/logical port.
+
+// GatewayPort represents a single gateway WAN/LAN port.
+type GatewayPort struct {
+	PortUUID        string   `json:"portUuid"`
+	PortName        string   `json:"portName"`
+	Type            int      `json:"type"`
+	Mode            int      `json:"mode"`
+	LanNetworkNames []string `json:"lanNetworkNames"`
+	SupportVPN      bool     `json:"supportVpn,omitempty"`
+	SupportIPTV     bool     `json:"supportIptv,omitempty"`
+	Closable        bool     `json:"closable,omitempty"`
+	Status          int      `json:"status,omitempty"`
+}
+
+// gatewayPortsResult mirrors the shape of /setting/wan/networks response.
+type gatewayPortsResult struct {
+	OmadacID    string `json:"omadacId"`
+	SiteID      string `json:"siteId"`
+	Enable      bool   `json:"enable"`
+	OsgPortInfo struct {
+		PreOsgModel        int           `json:"preOsgModel"`
+		WanLanPortSettings []GatewayPort `json:"wanLanPortSettings"`
+	} `json:"osgPortInfo"`
+}
+
+// ListGatewayPorts returns the list of WAN/LAN ports configurable on the
+// site's gateway. Works whether or not a gateway is currently adopted —
+// returns the controller's port template either way.
+func (c *Client) ListGatewayPorts(ctx context.Context, siteID string) ([]GatewayPort, error) {
+	resp, err := c.doSiteRequest(ctx, siteID, http.MethodGet, "/setting/wan/networks", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var result gatewayPortsResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("decoding gateway ports: %w", err)
+	}
+	if result.OsgPortInfo.WanLanPortSettings == nil {
+		return []GatewayPort{}, nil
+	}
+	return result.OsgPortInfo.WanLanPortSettings, nil
+}

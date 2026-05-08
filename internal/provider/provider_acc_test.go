@@ -352,3 +352,31 @@ data "omada_firewall_acls" "test" {
 		},
 	})
 }
+
+// =============================================================================
+// Data Source: omada_gateway_ports
+// Lists WAN/LAN ports on the gateway. Returns the port template even when
+// no gateway has been adopted (controller-side template for the configured
+// model).
+// =============================================================================
+
+func TestAccDataSourceGatewayPorts(t *testing.T) {
+	siteID := testSiteID(t)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+data "omada_gateway_ports" "test" {
+  site_id = %q
+}
+`, siteID),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet("data.omada_gateway_ports.test", "ports.#"),
+				),
+			},
+		},
+	})
+}
