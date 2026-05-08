@@ -93,7 +93,8 @@ func (d *NetworksDataSource) Read(ctx context.Context, req datasource.ReadReques
 	}
 
 	state := NetworksDataSourceModel{
-		SiteID: config.SiteID,
+		SiteID:   config.SiteID,
+		Networks: []NetworkDataModel{},
 	}
 	for _, n := range networks {
 		dm := NetworkDataModel{
@@ -218,8 +219,9 @@ func (d *WirelessNetworksDataSource) Read(ctx context.Context, req datasource.Re
 	}
 
 	state := WirelessNetworksDataSourceModel{
-		SiteID:      config.SiteID,
-		WlanGroupID: types.StringValue(wlanGroupID),
+		SiteID:           config.SiteID,
+		WlanGroupID:      types.StringValue(wlanGroupID),
+		WirelessNetworks: []WirelessNetworkDataModel{},
 	}
 	for _, s := range ssids {
 		dm := WirelessNetworkDataModel{
@@ -331,7 +333,8 @@ func (d *PortProfilesDataSource) Read(ctx context.Context, req datasource.ReadRe
 	}
 
 	state := PortProfilesDataSourceModel{
-		SiteID: config.SiteID,
+		SiteID:       config.SiteID,
+		PortProfiles: []PortProfileDataModel{},
 	}
 	for _, p := range profiles {
 		tagIDs, diags := types.ListValueFrom(ctx, types.StringType, p.TagNetworkIDs)
@@ -418,7 +421,9 @@ func (d *SitesDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 		return
 	}
 
-	var state SitesDataSourceModel
+	state := SitesDataSourceModel{
+		Sites: []SiteDataModel{},
+	}
 	for _, s := range sites {
 		state.Sites = append(state.Sites, SiteDataModel{
 			ID:   types.StringValue(s.ID),
@@ -732,7 +737,8 @@ func (d *DevicesDataSource) Read(ctx context.Context, req datasource.ReadRequest
 	}
 
 	state := DevicesDataSourceModel{
-		SiteID: config.SiteID,
+		SiteID:  config.SiteID,
+		Devices: []DeviceDataModel{},
 	}
 	for _, dev := range devices {
 		state.Devices = append(state.Devices, DeviceDataModel{
