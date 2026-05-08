@@ -27,6 +27,16 @@ The provider requires the URL, username, and password for your Omada Controller.
 
 The `site` attribute is optional. When set, all site-scoped operations (networks, SSIDs, devices, etc.) use that site. When omitted, global operations like listing sites still work, and site-scoped operations will use the "Default" site.
 
+## Lazy Authentication
+
+The provider authenticates with the controller on the **first API call**, not at `terraform init` or `terraform plan` time. Practical implications:
+
+- `terraform plan` and `terraform validate` against a config whose resources resolve to `count = 0` or empty `for_each` succeed without controller traffic — no credentials required at plan time.
+- Configuration errors (missing URL, bad credentials, unreachable controller) surface on the first resource / data source read or write, not at plan time.
+- A failed authentication terminates the operation; the next attempt re-tries auth lazily again.
+
+This makes it safe to commit Terraform configs that reference the provider into repositories whose contributors don't have controller credentials, as long as those contributors avoid touching the resources at plan / apply time.
+
 ## Example Usage
 
 ```terraform

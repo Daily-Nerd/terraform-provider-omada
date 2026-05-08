@@ -308,15 +308,14 @@ func NewClient(baseURL, username, password string, skipTLSVerify bool) (*Client,
 		httpClient: httpClient,
 	}
 
-	// Step 1: Get controller ID
-	if err := c.getControllerInfo(context.Background()); err != nil {
-		return nil, fmt.Errorf("getting controller info: %w", err)
-	}
-
-	// Step 2: Login
-	if err := c.login(context.Background()); err != nil {
-		return nil, fmt.Errorf("logging in: %w", err)
-	}
+	// Authentication is deferred until the first API request. NewClient only
+	// validates basic structural inputs (cookie jar, transport, URL trim).
+	// The controller info + login round-trip happens inside ensureAuth, gated
+	// by the first call to doSiteRequest / doGlobalRequest.
+	//
+	// This lets terraform plan / validate succeed against configs whose
+	// resources resolve to count=0 or empty for_each without requiring live
+	// controller credentials.
 
 	return c, nil
 }
@@ -381,13 +380,21 @@ func (c *Client) login(ctx context.Context) error {
 	return nil
 }
 
-// ensureAuth re-authenticates if the session has expired.
+// ensureAuth lazily authenticates with the controller. It is safe to call
+// multiple times — subsequent calls become no-ops once omadacID and token are
+// populated. Called at the top of every site-scoped and global-scoped request
+// helper to keep authentication deferred until first real use.
 func (c *Client) ensureAuth(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.omadacID == "" {
+		if err := c.getControllerInfo(ctx); err != nil {
+			return fmt.Errorf("getting controller info: %w", err)
+		}
+	}
 	if c.token == "" {
 		if err := c.login(ctx); err != nil {
-			return err
+			return fmt.Errorf("logging in: %w", err)
 		}
 	}
 	return nil
@@ -412,15 +419,36 @@ func (c *Client) siteURL(siteID, path string) string {
 	return fmt.Sprintf("%s/%s/api/v2/sites/%s%s?token=%s", c.baseURL, c.omadacID, siteID, path, c.token)
 }
 
-// doSiteRequest performs a site-scoped API request.
+// doSiteRequest performs a site-scoped API request. Lazily authenticates on
+// first call.
 func (c *Client) doSiteRequest(ctx context.Context, siteID, method, path string, body interface{}) (*APIResponse, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
 	url := c.siteURL(siteID, path)
 	return c.doRequest(ctx, method, url, body)
 }
 
-// doSiteRequestWithParams is like doSiteRequest but appends extra query params.
+// doSiteRequestWithParams is like doSiteRequest but appends extra query
+// params. Lazily authenticates on first call.
 func (c *Client) doSiteRequestWithParams(ctx context.Context, siteID, method, path, extraParams string, body interface{}) (*APIResponse, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
 	url := c.siteURL(siteID, path) + extraParams
+	return c.doRequest(ctx, method, url, body)
+}
+
+// doGlobalRequest performs a non-site-scoped API request (e.g., /sites,
+// /idps, /extendUserGroups). Lazily authenticates on first call. Use this
+// instead of building a URL with c.globalURL() and calling c.doRequest()
+// directly — the latter pattern bypasses lazy auth and will see empty token
+// on first invocation.
+func (c *Client) doGlobalRequest(ctx context.Context, method, path, extraParams string, body interface{}) (*APIResponse, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+	url := c.globalURL(path) + extraParams
 	return c.doRequest(ctx, method, url, body)
 }
 
@@ -532,8 +560,7 @@ func (c *Client) ResolveSiteID(ctx context.Context, nameOrID string) (string, er
 
 // ListSites returns all sites from the controller.
 func (c *Client) ListSites(ctx context.Context) ([]Site, error) {
-	url := c.globalURL("/sites") + "&currentPage=1&currentPageSize=100"
-	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	resp, err := c.doGlobalRequest(ctx, http.MethodGet, "/sites", "&currentPage=1&currentPageSize=100", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -546,8 +573,7 @@ func (c *Client) ListSites(ctx context.Context) ([]Site, error) {
 
 // GetSite returns a single site by ID via GET /api/v2/sites/{siteId}.
 func (c *Client) GetSite(ctx context.Context, siteID string) (*Site, error) {
-	url := c.globalURL(fmt.Sprintf("/sites/%s", siteID))
-	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	resp, err := c.doGlobalRequest(ctx, http.MethodGet, fmt.Sprintf("/sites/%s", siteID), "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -560,8 +586,7 @@ func (c *Client) GetSite(ctx context.Context, siteID string) (*Site, error) {
 
 // CreateSite creates a new site via POST /api/v2/sites.
 func (c *Client) CreateSite(ctx context.Context, req *SiteCreateRequest) (string, error) {
-	url := c.globalURL("/sites")
-	resp, err := c.doRequest(ctx, http.MethodPost, url, req)
+	resp, err := c.doGlobalRequest(ctx, http.MethodPost, "/sites", "", req)
 	if err != nil {
 		return "", err
 	}
@@ -574,16 +599,14 @@ func (c *Client) CreateSite(ctx context.Context, req *SiteCreateRequest) (string
 
 // UpdateSite updates a site's name, region, timezone, and scenario via PATCH /sites/{id}/setting.
 func (c *Client) UpdateSite(ctx context.Context, siteID string, fields *SiteSettingFields) error {
-	url := fmt.Sprintf("%s/%s/api/v2/sites/%s/setting?token=%s", c.baseURL, c.omadacID, siteID, c.token)
 	payload := &SiteSettingUpdate{Site: fields}
-	_, err := c.doRequest(ctx, http.MethodPatch, url, payload)
+	_, err := c.doSiteRequest(ctx, siteID, http.MethodPatch, "/setting", payload)
 	return err
 }
 
 // DeleteSite deletes a site via DELETE /api/v2/sites/{siteId}.
 func (c *Client) DeleteSite(ctx context.Context, siteID string) error {
-	url := c.globalURL(fmt.Sprintf("/sites/%s", siteID))
-	_, err := c.doRequest(ctx, http.MethodDelete, url, nil)
+	_, err := c.doGlobalRequest(ctx, http.MethodDelete, fmt.Sprintf("/sites/%s", siteID), "", nil)
 	return err
 }
 
@@ -1899,8 +1922,7 @@ type SAMLIdPCreateRequest struct {
 
 // ListSAMLIdPs returns all SAML identity provider connections.
 func (c *Client) ListSAMLIdPs(ctx context.Context) ([]SAMLIdP, error) {
-	url := c.globalURL("/idps") + "&currentPage=1&currentPageSize=100"
-	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	resp, err := c.doGlobalRequest(ctx, http.MethodGet, "/idps", "&currentPage=1&currentPageSize=100", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1931,8 +1953,7 @@ func (c *Client) GetSAMLIdP(ctx context.Context, idpID string) (*SAMLIdP, error)
 // Returns the created IdP (fetched via list+filter since POST returns minimal data).
 func (c *Client) CreateSAMLIdP(ctx context.Context, req *SAMLIdPCreateRequest) (*SAMLIdP, error) {
 	req.ConfMethod = 2
-	url := c.globalURL("/idps")
-	_, err := c.doRequest(ctx, http.MethodPost, url, req)
+	_, err := c.doGlobalRequest(ctx, http.MethodPost, "/idps", "", req)
 	if err != nil {
 		return nil, err
 	}
@@ -1953,8 +1974,7 @@ func (c *Client) CreateSAMLIdP(ctx context.Context, req *SAMLIdPCreateRequest) (
 // UpdateSAMLIdP updates an existing SAML IdP via PUT (full replace).
 func (c *Client) UpdateSAMLIdP(ctx context.Context, idpID string, req *SAMLIdPCreateRequest) (*SAMLIdP, error) {
 	req.ConfMethod = 2
-	url := c.globalURL(fmt.Sprintf("/idps/%s", idpID))
-	_, err := c.doRequest(ctx, http.MethodPut, url, req)
+	_, err := c.doGlobalRequest(ctx, http.MethodPut, fmt.Sprintf("/idps/%s", idpID), "", req)
 	if err != nil {
 		return nil, err
 	}
@@ -1965,8 +1985,7 @@ func (c *Client) UpdateSAMLIdP(ctx context.Context, idpID string, req *SAMLIdPCr
 
 // DeleteSAMLIdP deletes a SAML identity provider connection.
 func (c *Client) DeleteSAMLIdP(ctx context.Context, idpID string) error {
-	url := c.globalURL(fmt.Sprintf("/idps/%s", idpID))
-	_, err := c.doRequest(ctx, http.MethodDelete, url, nil)
+	_, err := c.doGlobalRequest(ctx, http.MethodDelete, fmt.Sprintf("/idps/%s", idpID), "", nil)
 	return err
 }
 
@@ -2021,8 +2040,7 @@ type SAMLRoleCreateRequest struct {
 
 // ListSAMLRoles returns all SAML external user groups.
 func (c *Client) ListSAMLRoles(ctx context.Context) ([]SAMLRole, error) {
-	url := c.globalURL("/extendUserGroups") + "&currentPage=1&currentPageSize=100"
-	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	resp, err := c.doGlobalRequest(ctx, http.MethodGet, "/extendUserGroups", "&currentPage=1&currentPageSize=100", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2051,8 +2069,7 @@ func (c *Client) GetSAMLRole(ctx context.Context, roleID string) (*SAMLRole, err
 
 // CreateSAMLRole creates a new SAML external user group.
 func (c *Client) CreateSAMLRole(ctx context.Context, req *SAMLRoleCreateRequest) (*SAMLRole, error) {
-	url := c.globalURL("/extendUserGroups")
-	resp, err := c.doRequest(ctx, http.MethodPost, url, req)
+	resp, err := c.doGlobalRequest(ctx, http.MethodPost, "/extendUserGroups", "", req)
 	if err != nil {
 		return nil, err
 	}
@@ -2078,8 +2095,7 @@ func (c *Client) CreateSAMLRole(ctx context.Context, req *SAMLRoleCreateRequest)
 
 // UpdateSAMLRole updates an existing SAML role via PUT (full replace).
 func (c *Client) UpdateSAMLRole(ctx context.Context, roleID string, req *SAMLRoleCreateRequest) (*SAMLRole, error) {
-	url := c.globalURL(fmt.Sprintf("/extendUserGroups/%s", roleID))
-	_, err := c.doRequest(ctx, http.MethodPut, url, req)
+	_, err := c.doGlobalRequest(ctx, http.MethodPut, fmt.Sprintf("/extendUserGroups/%s", roleID), "", req)
 	if err != nil {
 		return nil, err
 	}
@@ -2089,8 +2105,7 @@ func (c *Client) UpdateSAMLRole(ctx context.Context, roleID string, req *SAMLRol
 
 // DeleteSAMLRole deletes a SAML external user group.
 func (c *Client) DeleteSAMLRole(ctx context.Context, roleID string) error {
-	url := c.globalURL(fmt.Sprintf("/extendUserGroups/%s", roleID))
-	_, err := c.doRequest(ctx, http.MethodDelete, url, nil)
+	_, err := c.doGlobalRequest(ctx, http.MethodDelete, fmt.Sprintf("/extendUserGroups/%s", roleID), "", nil)
 	return err
 }
 
@@ -2121,9 +2136,6 @@ func (c *Client) UploadCertificate(ctx context.Context, certPEM []byte, fileName
 	if c.readOnly {
 		return "", ErrReadOnly
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if err := c.ensureAuth(ctx); err != nil {
 		return "", err
@@ -2195,9 +2207,6 @@ func (c *Client) UploadKey(ctx context.Context, keyPEM []byte, fileName string) 
 	if c.readOnly {
 		return "", ErrReadOnly
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if err := c.ensureAuth(ctx); err != nil {
 		return "", err
@@ -2281,21 +2290,12 @@ func (c *Client) ActivateCertificate(ctx context.Context, certID, keyID string) 
 		return ErrReadOnly
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if err := c.ensureAuth(ctx); err != nil {
-		return err
-	}
-
-	url := fmt.Sprintf("%s/%s/api/v2/controller/setting", c.baseURL, c.omadacID)
-
 	updateReq := ControllerSettingUpdate{
 		CertID: certID,
 		KeyID:  keyID,
 	}
 
-	_, err := c.doRequest(ctx, http.MethodPatch, url, updateReq)
+	_, err := c.doGlobalRequest(ctx, http.MethodPatch, "/controller/setting", "", updateReq)
 	return err
 }
 
@@ -2309,15 +2309,7 @@ type ControllerSetting struct {
 
 // GetControllerCertificateSetting retrieves the currently active certificate and key IDs.
 func (c *Client) GetControllerCertificateSetting(ctx context.Context) (*ControllerSetting, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if err := c.ensureAuth(ctx); err != nil {
-		return nil, err
-	}
-
-	url := fmt.Sprintf("%s/%s/api/v2/controller/setting", c.baseURL, c.omadacID)
-	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	resp, err := c.doGlobalRequest(ctx, http.MethodGet, "/controller/setting", "", nil)
 	if err != nil {
 		return nil, err
 	}

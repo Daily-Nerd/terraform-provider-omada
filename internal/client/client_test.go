@@ -85,20 +85,116 @@ func newTestClient(t *testing.T, server *httptest.Server) *Client {
 // NewClient / Auth Tests
 // =============================================================================
 
-func TestNewClient_Success(t *testing.T) {
-	server := mockOmadaServer(t, nil)
+// TestNewClient_LazyAuth verifies that NewClient does NOT issue any HTTP
+// requests during construction. Authentication is deferred to first API call.
+func TestNewClient_LazyAuth(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
 	defer server.Close()
 
-	c := newTestClient(t, server)
-	if c.omadacID != "test-omadac-id" {
-		t.Errorf("omadacID = %q, want %q", c.omadacID, "test-omadac-id")
+	_, err := NewClient(server.URL, "admin", "password", true)
+	if err != nil {
+		t.Fatalf("NewClient should succeed without controller round-trip: %v", err)
 	}
-	if c.token != "test-csrf-token" {
-		t.Errorf("token = %q, want %q", c.token, "test-csrf-token")
+	if requestCount != 0 {
+		t.Errorf("NewClient issued %d HTTP request(s); want 0 (lazy auth)", requestCount)
 	}
 }
 
-func TestNewClient_ControllerInfoError(t *testing.T) {
+// TestLazyAuth_FiresOnFirstAPICall verifies that auth happens on the first
+// real API call and that omadacID + token are populated afterward.
+func TestLazyAuth_FiresOnFirstAPICall(t *testing.T) {
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites": func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result:    paginatedResponse(t, []Site{{ID: "site-1", Name: "Test"}}),
+			})
+		},
+	})
+	defer server.Close()
+
+	c := newTestClient(t, server)
+
+	// Before any API call, identity fields should be empty.
+	if c.omadacID != "" || c.token != "" {
+		t.Errorf("pre-call state: omadacID=%q token=%q, want both empty", c.omadacID, c.token)
+	}
+
+	// First API call triggers auth.
+	if _, err := c.ListSites(context.Background()); err != nil {
+		t.Fatalf("ListSites: %v", err)
+	}
+
+	if c.omadacID != "test-omadac-id" {
+		t.Errorf("post-call omadacID = %q, want %q", c.omadacID, "test-omadac-id")
+	}
+	if c.token != "test-csrf-token" {
+		t.Errorf("post-call token = %q, want %q", c.token, "test-csrf-token")
+	}
+}
+
+// TestLazyAuth_OnlyAuthsOnce verifies that ensureAuth is idempotent — once
+// omadacID + token are populated, subsequent calls do not re-fire /api/info
+// or /login.
+func TestLazyAuth_OnlyAuthsOnce(t *testing.T) {
+	infoHits := 0
+	loginHits := 0
+	siteHits := 0
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
+		infoHits++
+		json.NewEncoder(w).Encode(APIResponse{
+			ErrorCode: 0,
+			Result:    mustMarshal(t, ControllerInfo{OmadacID: "test-omadac-id"}),
+		})
+	})
+	mux.HandleFunc("/test-omadac-id/api/v2/login", func(w http.ResponseWriter, r *http.Request) {
+		loginHits++
+		json.NewEncoder(w).Encode(APIResponse{
+			ErrorCode: 0,
+			Result:    mustMarshal(t, LoginResult{Token: "test-csrf-token"}),
+		})
+	})
+	mux.HandleFunc("/test-omadac-id/api/v2/sites", func(w http.ResponseWriter, r *http.Request) {
+		siteHits++
+		json.NewEncoder(w).Encode(APIResponse{
+			ErrorCode: 0,
+			Result:    paginatedResponse(t, []Site{{ID: "s1", Name: "A"}}),
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c, err := NewClient(server.URL, "admin", "password", true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := c.ListSites(context.Background()); err != nil {
+			t.Fatalf("ListSites[%d]: %v", i, err)
+		}
+	}
+
+	if infoHits != 1 {
+		t.Errorf("/api/info hits = %d, want 1 (cached after first auth)", infoHits)
+	}
+	if loginHits != 1 {
+		t.Errorf("/login hits = %d, want 1 (cached after first auth)", loginHits)
+	}
+	if siteHits != 3 {
+		t.Errorf("/sites hits = %d, want 3 (one per ListSites call)", siteHits)
+	}
+}
+
+// TestLazyAuth_ControllerInfoError verifies that controller info errors are
+// surfaced on the first API call (not at NewClient time).
+func TestLazyAuth_ControllerInfoError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(APIResponse{
 			ErrorCode: -1,
@@ -107,16 +203,23 @@ func TestNewClient_ControllerInfoError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := NewClient(server.URL, "admin", "password", true)
+	c, err := NewClient(server.URL, "admin", "password", true)
+	if err != nil {
+		t.Fatalf("NewClient should succeed (lazy auth): %v", err)
+	}
+
+	_, err = c.ListSites(context.Background())
 	if err == nil {
-		t.Fatal("expected error from NewClient, got nil")
+		t.Fatal("expected error from ListSites when /api/info fails, got nil")
 	}
 	if !strings.Contains(err.Error(), "controller info") {
 		t.Errorf("error = %q, expected to contain 'controller info'", err.Error())
 	}
 }
 
-func TestNewClient_LoginError(t *testing.T) {
+// TestLazyAuth_LoginError verifies that login errors surface on the first
+// API call (not at NewClient time).
+func TestLazyAuth_LoginError(t *testing.T) {
 	omadacID := "test-omadac-id"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
@@ -136,9 +239,14 @@ func TestNewClient_LoginError(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	_, err := NewClient(server.URL, "admin", "wrong", true)
+	c, err := NewClient(server.URL, "admin", "wrong", true)
+	if err != nil {
+		t.Fatalf("NewClient should succeed (lazy auth): %v", err)
+	}
+
+	_, err = c.ListSites(context.Background())
 	if err == nil {
-		t.Fatal("expected error from NewClient with bad credentials, got nil")
+		t.Fatal("expected error from ListSites with bad credentials, got nil")
 	}
 	if !strings.Contains(err.Error(), "logging in") {
 		t.Errorf("error = %q, expected to contain 'logging in'", err.Error())
@@ -146,9 +254,21 @@ func TestNewClient_LoginError(t *testing.T) {
 }
 
 func TestGetOmadacID(t *testing.T) {
-	server := mockOmadaServer(t, nil)
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites": func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result:    paginatedResponse(t, []Site{}),
+			})
+		},
+	})
 	defer server.Close()
 	c := newTestClient(t, server)
+
+	// Trigger lazy auth via any API call.
+	if _, err := c.ListSites(context.Background()); err != nil {
+		t.Fatalf("ListSites (auth trigger): %v", err)
+	}
 
 	if got := c.GetOmadacID(); got != "test-omadac-id" {
 		t.Errorf("GetOmadacID() = %q, want %q", got, "test-omadac-id")
