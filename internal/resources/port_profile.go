@@ -101,10 +101,11 @@ func (r *PortProfileResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Default:     int64default.StaticInt64(2),
 			},
 			"dot1x": schema.Int64Attribute{
-				Description: "802.1X setting: 0=port-based, 1=mac-based, 2=disabled.",
-				Optional:    true,
-				Computed:    true,
-				Default:     int64default.StaticInt64(2),
+				Description: "802.1X setting: 0=port-based, 1=mac-based, 2=disabled. " +
+					"Not supported on Easy Managed (Agile) switches — see docs/SWITCH_CLASS_MATRIX.md.",
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(2),
 			},
 			"port_isolation_enable": schema.BoolAttribute{
 				Description: "Enable port isolation.",
@@ -113,10 +114,11 @@ func (r *PortProfileResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Default:     booldefault.StaticBool(false),
 			},
 			"lldp_med_enable": schema.BoolAttribute{
-				Description: "Enable LLDP-MED.",
-				Optional:    true,
-				Computed:    true,
-				Default:     booldefault.StaticBool(true),
+				Description: "Enable LLDP-MED. " +
+					"Not supported on Easy Managed (Agile) switches — see docs/SWITCH_CLASS_MATRIX.md.",
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(true),
 			},
 			"topo_notify_enable": schema.BoolAttribute{
 				Description: "Enable topology change notification.",
@@ -144,7 +146,7 @@ func (r *PortProfileResource) Schema(_ context.Context, _ resource.SchemaRequest
 			},
 			"bandwidth_ctrl_type": schema.Int64Attribute{
 				Description: "Bandwidth control type: 0=disabled, 1=rate-limit, 2=storm-control. " +
-					"Not supported on Easy Managed (Agile) switches.",
+					"Not supported on Easy Managed (Agile) switches — see docs/SWITCH_CLASS_MATRIX.md.",
 				Optional: true,
 				Computed: true,
 				Default:  int64default.StaticInt64(0),
@@ -188,23 +190,25 @@ func (r *PortProfileResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Default:     booldefault.StaticBool(false),
 			},
 			"dot1p_priority": schema.Int64Attribute{
-				Description: "Default 802.1p priority (0..7). Not supported on Easy Managed switches.",
-				Optional:    true,
-				Computed:    true,
-				Default:     int64default.StaticInt64(0),
+				Description: "Default 802.1p priority (0..7). " +
+					"Not supported on Easy Managed switches — see docs/SWITCH_CLASS_MATRIX.md.",
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(0),
 			},
 			"trust_mode": schema.Int64Attribute{
 				Description: "QoS trust mode: 0=untrusted, 1=trust 802.1p, 2=trust DSCP. " +
-					"Not supported on Easy Managed switches.",
+					"Not supported on Easy Managed switches — see docs/SWITCH_CLASS_MATRIX.md.",
 				Optional: true,
 				Computed: true,
 				Default:  int64default.StaticInt64(0),
 			},
 			"dhcp_l2_relay_enable": schema.BoolAttribute{
-				Description: "Enable DHCP Layer-2 relay. Not supported on Easy Managed switches.",
-				Optional:    true,
-				Computed:    true,
-				Default:     booldefault.StaticBool(false),
+				Description: "Enable DHCP Layer-2 relay. " +
+					"Not supported on Easy Managed switches — see docs/SWITCH_CLASS_MATRIX.md.",
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
 			},
 			"stp_priority": schema.Int64Attribute{
 				Description: "STP bridge priority (0..240, must be a multiple of 16). Default 128.",
