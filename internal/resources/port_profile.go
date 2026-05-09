@@ -22,18 +22,43 @@ type PortProfileResource struct {
 }
 
 type PortProfileResourceModel struct {
-	ID                   types.String `tfsdk:"id"`
-	SiteID               types.String `tfsdk:"site_id"`
-	Name                 types.String `tfsdk:"name"`
-	NativeNetworkID      types.String `tfsdk:"native_network_id"`
-	TagNetworkIDs        types.List   `tfsdk:"tag_network_ids"`
-	POE                  types.Int64  `tfsdk:"poe"`
-	Dot1x                types.Int64  `tfsdk:"dot1x"`
-	PortIsolationEnable  types.Bool   `tfsdk:"port_isolation_enable"`
-	LLDPMedEnable        types.Bool   `tfsdk:"lldp_med_enable"`
-	TopoNotifyEnable     types.Bool   `tfsdk:"topo_notify_enable"`
-	SpanningTreeEnable   types.Bool   `tfsdk:"spanning_tree_enable"`
-	LoopbackDetectEnable types.Bool   `tfsdk:"loopback_detect_enable"`
+	ID                            types.String `tfsdk:"id"`
+	SiteID                        types.String `tfsdk:"site_id"`
+	Name                          types.String `tfsdk:"name"`
+	NativeNetworkID               types.String `tfsdk:"native_network_id"`
+	TagNetworkIDs                 types.List   `tfsdk:"tag_network_ids"`
+	UntagNetworkIDs               types.List   `tfsdk:"untag_network_ids"`
+	POE                           types.Int64  `tfsdk:"poe"`
+	Dot1x                         types.Int64  `tfsdk:"dot1x"`
+	PortIsolationEnable           types.Bool   `tfsdk:"port_isolation_enable"`
+	LLDPMedEnable                 types.Bool   `tfsdk:"lldp_med_enable"`
+	TopoNotifyEnable              types.Bool   `tfsdk:"topo_notify_enable"`
+	SpanningTreeEnable            types.Bool   `tfsdk:"spanning_tree_enable"`
+	LoopbackDetectEnable          types.Bool   `tfsdk:"loopback_detect_enable"`
+	BandWidthCtrlType             types.Int64  `tfsdk:"bandwidth_ctrl_type"`
+	EeeEnable                     types.Bool   `tfsdk:"eee_enable"`
+	FlowControlEnable             types.Bool   `tfsdk:"flow_control_enable"`
+	FastLeaveEnable               types.Bool   `tfsdk:"fast_leave_enable"`
+	LoopbackDetectVlanBasedEnable types.Bool   `tfsdk:"loopback_detect_vlan_based_enable"`
+	IgmpFastLeaveEnable           types.Bool   `tfsdk:"igmp_fast_leave_enable"`
+	MldFastLeaveEnable            types.Bool   `tfsdk:"mld_fast_leave_enable"`
+	Dot1pPriority                 types.Int64  `tfsdk:"dot1p_priority"`
+	TrustMode                     types.Int64  `tfsdk:"trust_mode"`
+	DhcpL2RelayEnable             types.Bool   `tfsdk:"dhcp_l2_relay_enable"`
+
+	// SpanningTreeSetting flattened with stp_ prefix.
+	StpPriority    types.Int64 `tfsdk:"stp_priority"`
+	StpExtPathCost types.Int64 `tfsdk:"stp_ext_path_cost"`
+	StpIntPathCost types.Int64 `tfsdk:"stp_int_path_cost"`
+	StpEdgePort    types.Bool  `tfsdk:"stp_edge_port"`
+	StpP2pLink     types.Int64 `tfsdk:"stp_p2p_link"`
+	StpMcheck      types.Bool  `tfsdk:"stp_mcheck"`
+	StpLoopProtect types.Bool  `tfsdk:"stp_loop_protect"`
+	StpRootProtect types.Bool  `tfsdk:"stp_root_protect"`
+	StpTcGuard     types.Bool  `tfsdk:"stp_tc_guard"`
+	StpBpduProtect types.Bool  `tfsdk:"stp_bpdu_protect"`
+	StpBpduFilter  types.Bool  `tfsdk:"stp_bpdu_filter"`
+	StpBpduForward types.Bool  `tfsdk:"stp_bpdu_forward"`
 }
 
 func NewPortProfileResource() resource.Resource {
@@ -111,6 +136,148 @@ func (r *PortProfileResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Computed:    true,
 				Default:     booldefault.StaticBool(true),
 			},
+			"untag_network_ids": schema.ListAttribute{
+				Description: "List of network IDs to untag on this port (separate from native_network_id). " +
+					"Used by some controller versions to express multiple untagged VLANs on a single profile.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"bandwidth_ctrl_type": schema.Int64Attribute{
+				Description: "Bandwidth control type: 0=disabled, 1=rate-limit, 2=storm-control. " +
+					"Not supported on Easy Managed (Agile) switches.",
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(0),
+			},
+			"eee_enable": schema.BoolAttribute{
+				Description: "Enable Energy Efficient Ethernet (802.3az).",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"flow_control_enable": schema.BoolAttribute{
+				Description: "Enable 802.3x flow control.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"fast_leave_enable": schema.BoolAttribute{
+				Description: "Legacy multicast fast-leave toggle. Newer controllers use " +
+					"`igmp_fast_leave_enable` and `mld_fast_leave_enable` instead — set those " +
+					"and leave this at the default unless you know your controller relies on it.",
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
+			},
+			"loopback_detect_vlan_based_enable": schema.BoolAttribute{
+				Description: "Enable per-VLAN loopback detection.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"igmp_fast_leave_enable": schema.BoolAttribute{
+				Description: "Enable IGMP (IPv4 multicast) fast-leave.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"mld_fast_leave_enable": schema.BoolAttribute{
+				Description: "Enable MLD (IPv6 multicast) fast-leave.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"dot1p_priority": schema.Int64Attribute{
+				Description: "Default 802.1p priority (0..7). Not supported on Easy Managed switches.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(0),
+			},
+			"trust_mode": schema.Int64Attribute{
+				Description: "QoS trust mode: 0=untrusted, 1=trust 802.1p, 2=trust DSCP. " +
+					"Not supported on Easy Managed switches.",
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(0),
+			},
+			"dhcp_l2_relay_enable": schema.BoolAttribute{
+				Description: "Enable DHCP Layer-2 relay. Not supported on Easy Managed switches.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"stp_priority": schema.Int64Attribute{
+				Description: "STP bridge priority (0..240, must be a multiple of 16). Default 128.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(128),
+			},
+			"stp_ext_path_cost": schema.Int64Attribute{
+				Description: "STP external path cost. 0 = use default.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(0),
+			},
+			"stp_int_path_cost": schema.Int64Attribute{
+				Description: "STP internal path cost. 0 = use default.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(0),
+			},
+			"stp_edge_port": schema.BoolAttribute{
+				Description: "Treat the port as an STP edge port (skip listening/learning, transition directly to forwarding).",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"stp_p2p_link": schema.Int64Attribute{
+				Description: "STP point-to-point link mode: 0=auto, 1=force-true, 2=force-false.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(0),
+			},
+			"stp_mcheck": schema.BoolAttribute{
+				Description: "Force STP migration check (force-RSTP/MSTP renegotiation).",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"stp_loop_protect": schema.BoolAttribute{
+				Description: "Enable STP loop protection.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"stp_root_protect": schema.BoolAttribute{
+				Description: "Enable STP root bridge protection (prevents this port from becoming root).",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"stp_tc_guard": schema.BoolAttribute{
+				Description: "Enable STP topology change guard.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"stp_bpdu_protect": schema.BoolAttribute{
+				Description: "Enable BPDU protection — shut the port down on BPDU receipt.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"stp_bpdu_filter": schema.BoolAttribute{
+				Description: "Filter BPDUs on this port (drop them silently). Use cautiously — interacts with `stp_edge_port`.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"stp_bpdu_forward": schema.BoolAttribute{
+				Description: "Forward BPDUs on this port even when STP is disabled. Default true (matches controller default).",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(true),
+			},
 		},
 	}
 }
@@ -130,6 +297,143 @@ func (r *PortProfileResource) Configure(_ context.Context, req resource.Configur
 	r.client = c
 }
 
+// buildPortProfileFromModel converts the Terraform plan / state model into the
+// API client struct for create + update.
+func buildPortProfileFromModel(ctx context.Context, m *PortProfileResourceModel, diags *[]error) *client.PortProfile {
+	profile := &client.PortProfile{
+		Name:                          m.Name.ValueString(),
+		NativeNetworkID:               m.NativeNetworkID.ValueString(),
+		POE:                           int(m.POE.ValueInt64()),
+		Dot1x:                         int(m.Dot1x.ValueInt64()),
+		PortIsolationEnable:           m.PortIsolationEnable.ValueBool(),
+		LLDPMedEnable:                 m.LLDPMedEnable.ValueBool(),
+		TopoNotifyEnable:              m.TopoNotifyEnable.ValueBool(),
+		SpanningTreeEnable:            m.SpanningTreeEnable.ValueBool(),
+		LoopbackDetectEnable:          m.LoopbackDetectEnable.ValueBool(),
+		BandWidthCtrlType:             int(m.BandWidthCtrlType.ValueInt64()),
+		EeeEnable:                     m.EeeEnable.ValueBool(),
+		FlowControlEnable:             m.FlowControlEnable.ValueBool(),
+		FastLeaveEnable:               m.FastLeaveEnable.ValueBool(),
+		LoopbackDetectVlanBasedEnable: m.LoopbackDetectVlanBasedEnable.ValueBool(),
+		IgmpFastLeaveEnable:           m.IgmpFastLeaveEnable.ValueBool(),
+		MldFastLeaveEnable:            m.MldFastLeaveEnable.ValueBool(),
+		Dot1pPriority:                 int(m.Dot1pPriority.ValueInt64()),
+		TrustMode:                     int(m.TrustMode.ValueInt64()),
+		SpanningTreeSetting: &client.SpanningTreeSetting{
+			Priority:    int(m.StpPriority.ValueInt64()),
+			ExtPathCost: int(m.StpExtPathCost.ValueInt64()),
+			IntPathCost: int(m.StpIntPathCost.ValueInt64()),
+			EdgePort:    m.StpEdgePort.ValueBool(),
+			P2pLink:     int(m.StpP2pLink.ValueInt64()),
+			Mcheck:      m.StpMcheck.ValueBool(),
+			LoopProtect: m.StpLoopProtect.ValueBool(),
+			RootProtect: m.StpRootProtect.ValueBool(),
+			TcGuard:     m.StpTcGuard.ValueBool(),
+			BpduProtect: m.StpBpduProtect.ValueBool(),
+			BpduFilter:  m.StpBpduFilter.ValueBool(),
+			BpduForward: m.StpBpduForward.ValueBool(),
+		},
+		DhcpL2RelaySettings: &client.DhcpL2RelaySettings{
+			Enable: m.DhcpL2RelayEnable.ValueBool(),
+		},
+	}
+
+	if !m.TagNetworkIDs.IsNull() && !m.TagNetworkIDs.IsUnknown() {
+		var tagIDs []string
+		d := m.TagNetworkIDs.ElementsAs(ctx, &tagIDs, false)
+		if d.HasError() {
+			for _, e := range d.Errors() {
+				*diags = append(*diags, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
+			}
+			return nil
+		}
+		profile.TagNetworkIDs = tagIDs
+	}
+
+	if !m.UntagNetworkIDs.IsNull() && !m.UntagNetworkIDs.IsUnknown() {
+		var untagIDs []string
+		d := m.UntagNetworkIDs.ElementsAs(ctx, &untagIDs, false)
+		if d.HasError() {
+			for _, e := range d.Errors() {
+				*diags = append(*diags, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
+			}
+			return nil
+		}
+		profile.UntagNetworkIDs = untagIDs
+	}
+
+	return profile
+}
+
+// applyPortProfileToModel writes the API client struct back into the
+// Terraform model on Read / ImportState. Preserves null vs empty-list
+// semantics for tag/untag lists when the user did not declare them.
+func applyPortProfileToModel(ctx context.Context, m *PortProfileResourceModel, profile *client.PortProfile) error {
+	m.Name = types.StringValue(profile.Name)
+	m.NativeNetworkID = types.StringValue(profile.NativeNetworkID)
+	m.POE = types.Int64Value(int64(profile.POE))
+	m.Dot1x = types.Int64Value(int64(profile.Dot1x))
+	m.PortIsolationEnable = types.BoolValue(profile.PortIsolationEnable)
+	m.LLDPMedEnable = types.BoolValue(profile.LLDPMedEnable)
+	m.TopoNotifyEnable = types.BoolValue(profile.TopoNotifyEnable)
+	m.SpanningTreeEnable = types.BoolValue(profile.SpanningTreeEnable)
+	m.LoopbackDetectEnable = types.BoolValue(profile.LoopbackDetectEnable)
+	m.BandWidthCtrlType = types.Int64Value(int64(profile.BandWidthCtrlType))
+	m.EeeEnable = types.BoolValue(profile.EeeEnable)
+	m.FlowControlEnable = types.BoolValue(profile.FlowControlEnable)
+	m.FastLeaveEnable = types.BoolValue(profile.FastLeaveEnable)
+	m.LoopbackDetectVlanBasedEnable = types.BoolValue(profile.LoopbackDetectVlanBasedEnable)
+	m.IgmpFastLeaveEnable = types.BoolValue(profile.IgmpFastLeaveEnable)
+	m.MldFastLeaveEnable = types.BoolValue(profile.MldFastLeaveEnable)
+	m.Dot1pPriority = types.Int64Value(int64(profile.Dot1pPriority))
+	m.TrustMode = types.Int64Value(int64(profile.TrustMode))
+
+	if profile.DhcpL2RelaySettings != nil {
+		m.DhcpL2RelayEnable = types.BoolValue(profile.DhcpL2RelaySettings.Enable)
+	} else {
+		m.DhcpL2RelayEnable = types.BoolValue(false)
+	}
+
+	if profile.SpanningTreeSetting != nil {
+		s := profile.SpanningTreeSetting
+		m.StpPriority = types.Int64Value(int64(s.Priority))
+		m.StpExtPathCost = types.Int64Value(int64(s.ExtPathCost))
+		m.StpIntPathCost = types.Int64Value(int64(s.IntPathCost))
+		m.StpEdgePort = types.BoolValue(s.EdgePort)
+		m.StpP2pLink = types.Int64Value(int64(s.P2pLink))
+		m.StpMcheck = types.BoolValue(s.Mcheck)
+		m.StpLoopProtect = types.BoolValue(s.LoopProtect)
+		m.StpRootProtect = types.BoolValue(s.RootProtect)
+		m.StpTcGuard = types.BoolValue(s.TcGuard)
+		m.StpBpduProtect = types.BoolValue(s.BpduProtect)
+		m.StpBpduFilter = types.BoolValue(s.BpduFilter)
+		m.StpBpduForward = types.BoolValue(s.BpduForward)
+	}
+
+	// Preserve null vs empty-list semantics for both tag lists.
+	if len(profile.TagNetworkIDs) == 0 && m.TagNetworkIDs.IsNull() {
+		m.TagNetworkIDs = types.ListNull(types.StringType)
+	} else {
+		tagIDs, diags := types.ListValueFrom(ctx, types.StringType, profile.TagNetworkIDs)
+		if diags.HasError() {
+			return fmt.Errorf("decoding tag_network_ids: %v", diags)
+		}
+		m.TagNetworkIDs = tagIDs
+	}
+
+	if len(profile.UntagNetworkIDs) == 0 && m.UntagNetworkIDs.IsNull() {
+		m.UntagNetworkIDs = types.ListNull(types.StringType)
+	} else {
+		untagIDs, diags := types.ListValueFrom(ctx, types.StringType, profile.UntagNetworkIDs)
+		if diags.HasError() {
+			return fmt.Errorf("decoding untag_network_ids: %v", diags)
+		}
+		m.UntagNetworkIDs = untagIDs
+	}
+
+	return nil
+}
+
 func (r *PortProfileResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan PortProfileResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -139,30 +443,13 @@ func (r *PortProfileResource) Create(ctx context.Context, req resource.CreateReq
 
 	siteID := plan.SiteID.ValueString()
 
-	profile := &client.PortProfile{
-		Name:                 plan.Name.ValueString(),
-		NativeNetworkID:      plan.NativeNetworkID.ValueString(),
-		POE:                  int(plan.POE.ValueInt64()),
-		Dot1x:                int(plan.Dot1x.ValueInt64()),
-		PortIsolationEnable:  plan.PortIsolationEnable.ValueBool(),
-		LLDPMedEnable:        plan.LLDPMedEnable.ValueBool(),
-		TopoNotifyEnable:     plan.TopoNotifyEnable.ValueBool(),
-		SpanningTreeEnable:   plan.SpanningTreeEnable.ValueBool(),
-		LoopbackDetectEnable: plan.LoopbackDetectEnable.ValueBool(),
-		SpanningTreeSetting: &client.SpanningTreeSetting{
-			Priority:    128,
-			BpduForward: true,
-		},
-		DhcpL2RelaySettings: &client.DhcpL2RelaySettings{},
-	}
-
-	if !plan.TagNetworkIDs.IsNull() && !plan.TagNetworkIDs.IsUnknown() {
-		var tagIDs []string
-		resp.Diagnostics.Append(plan.TagNetworkIDs.ElementsAs(ctx, &tagIDs, false)...)
-		if resp.Diagnostics.HasError() {
-			return
+	var buildErrs []error
+	profile := buildPortProfileFromModel(ctx, &plan, &buildErrs)
+	if len(buildErrs) > 0 {
+		for _, e := range buildErrs {
+			resp.Diagnostics.AddError("Building port profile payload", e.Error())
 		}
-		profile.TagNetworkIDs = tagIDs
+		return
 	}
 
 	created, err := r.client.CreatePortProfile(ctx, siteID, profile)
@@ -190,25 +477,9 @@ func (r *PortProfileResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	state.Name = types.StringValue(profile.Name)
-	state.NativeNetworkID = types.StringValue(profile.NativeNetworkID)
-	state.POE = types.Int64Value(int64(profile.POE))
-	state.Dot1x = types.Int64Value(int64(profile.Dot1x))
-	state.PortIsolationEnable = types.BoolValue(profile.PortIsolationEnable)
-	state.LLDPMedEnable = types.BoolValue(profile.LLDPMedEnable)
-	state.TopoNotifyEnable = types.BoolValue(profile.TopoNotifyEnable)
-	state.SpanningTreeEnable = types.BoolValue(profile.SpanningTreeEnable)
-	state.LoopbackDetectEnable = types.BoolValue(profile.LoopbackDetectEnable)
-
-	// Preserve null vs empty-list semantics: if the user didn't set tag_network_ids
-	// (state is null) and the API returned an empty list, keep it as null to avoid
-	// perpetual diff.
-	if len(profile.TagNetworkIDs) == 0 && state.TagNetworkIDs.IsNull() {
-		state.TagNetworkIDs = types.ListNull(types.StringType)
-	} else {
-		tagIDs, diags := types.ListValueFrom(ctx, types.StringType, profile.TagNetworkIDs)
-		resp.Diagnostics.Append(diags...)
-		state.TagNetworkIDs = tagIDs
+	if err := applyPortProfileToModel(ctx, &state, profile); err != nil {
+		resp.Diagnostics.AddError("Error decoding port profile", err.Error())
+		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -229,30 +500,13 @@ func (r *PortProfileResource) Update(ctx context.Context, req resource.UpdateReq
 
 	siteID := state.SiteID.ValueString()
 
-	profile := &client.PortProfile{
-		Name:                 plan.Name.ValueString(),
-		NativeNetworkID:      plan.NativeNetworkID.ValueString(),
-		POE:                  int(plan.POE.ValueInt64()),
-		Dot1x:                int(plan.Dot1x.ValueInt64()),
-		PortIsolationEnable:  plan.PortIsolationEnable.ValueBool(),
-		LLDPMedEnable:        plan.LLDPMedEnable.ValueBool(),
-		TopoNotifyEnable:     plan.TopoNotifyEnable.ValueBool(),
-		SpanningTreeEnable:   plan.SpanningTreeEnable.ValueBool(),
-		LoopbackDetectEnable: plan.LoopbackDetectEnable.ValueBool(),
-		SpanningTreeSetting: &client.SpanningTreeSetting{
-			Priority:    128,
-			BpduForward: true,
-		},
-		DhcpL2RelaySettings: &client.DhcpL2RelaySettings{},
-	}
-
-	if !plan.TagNetworkIDs.IsNull() && !plan.TagNetworkIDs.IsUnknown() {
-		var tagIDs []string
-		resp.Diagnostics.Append(plan.TagNetworkIDs.ElementsAs(ctx, &tagIDs, false)...)
-		if resp.Diagnostics.HasError() {
-			return
+	var buildErrs []error
+	profile := buildPortProfileFromModel(ctx, &plan, &buildErrs)
+	if len(buildErrs) > 0 {
+		for _, e := range buildErrs {
+			resp.Diagnostics.AddError("Building port profile payload", e.Error())
 		}
-		profile.TagNetworkIDs = tagIDs
+		return
 	}
 
 	_, err := r.client.UpdatePortProfile(ctx, siteID, state.ID.ValueString(), profile)
@@ -296,22 +550,18 @@ func (r *PortProfileResource) ImportState(ctx context.Context, req resource.Impo
 		return
 	}
 
-	tagIDs, diags := types.ListValueFrom(ctx, types.StringType, profile.TagNetworkIDs)
-	resp.Diagnostics.Append(diags...)
-
 	state := PortProfileResourceModel{
-		ID:                   types.StringValue(profile.ID),
-		SiteID:               types.StringValue(siteID),
-		Name:                 types.StringValue(profile.Name),
-		NativeNetworkID:      types.StringValue(profile.NativeNetworkID),
-		TagNetworkIDs:        tagIDs,
-		POE:                  types.Int64Value(int64(profile.POE)),
-		Dot1x:                types.Int64Value(int64(profile.Dot1x)),
-		PortIsolationEnable:  types.BoolValue(profile.PortIsolationEnable),
-		LLDPMedEnable:        types.BoolValue(profile.LLDPMedEnable),
-		TopoNotifyEnable:     types.BoolValue(profile.TopoNotifyEnable),
-		SpanningTreeEnable:   types.BoolValue(profile.SpanningTreeEnable),
-		LoopbackDetectEnable: types.BoolValue(profile.LoopbackDetectEnable),
+		ID:     types.StringValue(profile.ID),
+		SiteID: types.StringValue(siteID),
+		// Empty list defaults so applyPortProfileToModel writes the API
+		// values into known-list state instead of treating as null-preserve.
+		TagNetworkIDs:   types.ListNull(types.StringType),
+		UntagNetworkIDs: types.ListNull(types.StringType),
+	}
+
+	if err := applyPortProfileToModel(ctx, &state, profile); err != nil {
+		resp.Diagnostics.AddError("Error decoding imported port profile", err.Error())
+		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
