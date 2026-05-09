@@ -66,6 +66,15 @@
 - `docs/CONTRIBUTING.md`: added switch-class compatibility section pointing
   to the new matrix; added `omada_switch_port` row to the dev-controller
   capability matrix.
+- `omada_port_profile` `ValidateConfig`: emits non-blocking plan-time
+  warnings when the user explicitly sets a field that the controller
+  silently ignores on Easy Managed (Agile) switches. Covers `dot1x`,
+  `lldp_med_enable`, `dot1p_priority`, `trust_mode`, `dhcp_l2_relay_enable`,
+  `bandwidth_ctrl_type`. Defaults never trigger (zero-warning baseline);
+  warnings fire only on "active" non-default values. Closes Phase 2 of
+  [#25](https://github.com/Daily-Nerd/terraform-provider-omada/issues/25).
+  Phase 3 (opt-in hard validation with switch-class API roundtrip) remains
+  open if user demand surfaces.
 
 ### Changed
 - **BEHAVIOR**: provider authentication is now lazy. The `Configure()` step no longer issues HTTP requests to `/api/info` or `/login`. Auth happens on the first real API call (resource read / write). `terraform validate` and `terraform plan` against configs whose resources resolve to `count = 0` or empty `for_each` no longer require controller credentials. Configuration errors (bad URL, bad credentials) surface at first API call instead of plan time. Closes [#24](https://github.com/Daily-Nerd/terraform-provider-omada/issues/24).
