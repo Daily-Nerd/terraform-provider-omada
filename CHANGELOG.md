@@ -36,6 +36,21 @@
 - `internal/resources/network_test.go`: round-trip tests for `buildNetworkFromModel`
   and `applyNetworkToModel`, including purpose=vlan null-preservation and full
   purpose=interface field coverage.
+- `omada_switch_port` resource: per-port granular VLAN config via PATCH
+  `/switches/{mac}/ports/{port}`. One Terraform resource per port, suitable
+  for `for_each` iteration over a switch's port range. Distinct from
+  `omada_device_switch.ports[]` which manages the whole switch in one resource.
+  Schema covers profile_id, profile_override_enable, native_network_id,
+  network_tags_setting, tag_network_ids, untag_network_ids, voice_network_enable,
+  voice_dscp_enable, speed, name, disable. Delete is a no-op (ports cannot be
+  destroyed) — drops resource from TF state with a warning. Import format:
+  `{site_id}/{device_mac}/{port}`.
+  Closes [#23](https://github.com/Daily-Nerd/terraform-provider-omada/issues/23).
+- `client.GetSwitchPort(siteID, mac, port)` helper that fetches the full
+  switch config and returns a single port by 1-based index.
+- `internal/resources/switch_port_test.go`: 4 round-trip tests covering the
+  full PATCH payload, optional-field omission semantics, model apply, and
+  null-vs-empty-list preservation.
 
 ### Changed
 - **BEHAVIOR**: provider authentication is now lazy. The `Configure()` step no longer issues HTTP requests to `/api/info` or `/login`. Auth happens on the first real API call (resource read / write). `terraform validate` and `terraform plan` against configs whose resources resolve to `count = 0` or empty `for_each` no longer require controller credentials. Configuration errors (bad URL, bad credentials) surface at first API call instead of plan time. Closes [#24](https://github.com/Daily-Nerd/terraform-provider-omada/issues/24).
