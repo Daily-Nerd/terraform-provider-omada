@@ -26,12 +26,24 @@
 - `internal/resources/port_profile_test.go`: round-trip tests for `buildPortProfileFromModel`
   and `applyPortProfileToModel`, including null-vs-empty-list preservation for both
   `tag_network_ids` and `untag_network_ids`.
+- `omada_network` resource: surfaced 14 controller-exposed fields previously hidden from the schema. New attributes:
+  `application`, `vlan_type`, `isolation`, `fast_leave_enable`, `mld_snoop_enable`,
+  `dhcpv6_guard_enable`, `dhcp_guard_enable`, `dhcp_l2_relay_enable`,
+  `portal_enable`, `access_control_rule_enable`, `rate_limit_enable`,
+  `arp_detection_enable`, `dhcp_lease_time`, `dhcp_dns_source`. All Optional+Computed
+  with defaults matching the controller's observed defaults so existing networks
+  round-trip cleanly. Closes [#15](https://github.com/Daily-Nerd/terraform-provider-omada/issues/15).
+- `internal/resources/network_test.go`: round-trip tests for `buildNetworkFromModel`
+  and `applyNetworkToModel`, including purpose=vlan null-preservation and full
+  purpose=interface field coverage.
 
 ### Changed
 - **BEHAVIOR**: provider authentication is now lazy. The `Configure()` step no longer issues HTTP requests to `/api/info` or `/login`. Auth happens on the first real API call (resource read / write). `terraform validate` and `terraform plan` against configs whose resources resolve to `count = 0` or empty `for_each` no longer require controller credentials. Configuration errors (bad URL, bad credentials) surface at first API call instead of plan time. Closes [#24](https://github.com/Daily-Nerd/terraform-provider-omada/issues/24).
 - All non-site-scoped API methods (sites CRUD, SAML IdP / role CRUD, controller certificate setting) now route through a new `doGlobalRequest` helper that gates auth via `ensureAuth`. This eliminates a class of latent races where URL construction read `c.token` before authentication completed.
 - `UpdateSite` now uses the standard `doSiteRequest` helper instead of building its URL inline.
 - `omada_port_profile` Create/Update no longer hardcode `SpanningTreeSetting{Priority: 128, BpduForward: true}`. STP fields are user-controllable (with backward-compatible defaults). Migration: existing state will round-trip cleanly because controller defaults already match the prior hardcoded values.
+- `omada_network` Create/Update/Read/ImportState now share `buildNetworkFromModel` and `applyNetworkToModel` helpers. Eliminates the regression class where new client struct fields could land without schema exposure (the gap #15 was tracking).
+- `client.Network` struct adds 11 new JSON-serialized fields and two nested guard structs (`DhcpV6Guard`, `DhcpGuard`). All zero-valued by default — no behavior change for callers that didn't set them.
 
 ### Planned for 0.1.0
 - Add `lan_interface_ids` field to `omada_network` resource (fixes `-33515 LAN interfaces could not be none` on create).
