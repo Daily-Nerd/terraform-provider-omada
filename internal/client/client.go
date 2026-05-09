@@ -1629,6 +1629,22 @@ func (c *Client) UpdateSwitchPort(ctx context.Context, siteID, mac string, port 
 	return err
 }
 
+// GetSwitchPort fetches the full switch config and returns a single port by
+// number (1-based). Returns ErrNotFound if the port doesn't exist (e.g.,
+// out-of-range index for the switch model).
+func (c *Client) GetSwitchPort(ctx context.Context, siteID, mac string, port int) (*SwitchPort, error) {
+	cfg, err := c.GetSwitchConfig(ctx, siteID, mac)
+	if err != nil {
+		return nil, fmt.Errorf("getting switch config for port lookup: %w", err)
+	}
+	for i := range cfg.Ports {
+		if cfg.Ports[i].Port == port {
+			return &cfg.Ports[i], nil
+		}
+	}
+	return nil, fmt.Errorf("port %d not found on switch %s (switch has %d ports)", port, mac, len(cfg.Ports))
+}
+
 // UpdateSwitchServiceConfig updates switch service settings via PUT /switches/{mac}/config/service.
 // The ES series path is determined from the "es" field in the raw GET response,
 // consistent with UpdateSwitchConfig.
