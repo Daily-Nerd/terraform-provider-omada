@@ -2,6 +2,44 @@
 
 > **Fork point.** This changelog continues from `emanuelbesliu/terraform-provider-tplink-omada` v2.1.1. The Daily-Nerd fork resets versioning to `0.x.y` to signal a different lineage. Upstream history is preserved below for reference.
 
+## 0.1.0 (2026-05-09)
+
+
+### Features
+
+* acceptance test infrastructure (closes [#7](https://github.com/Daily-Nerd/terraform-provider-omada/issues/7)) ([b807129](https://github.com/Daily-Nerd/terraform-provider-omada/commit/b807129f86644084e591d7eec8ecf8e7480b1dfa))
+* acceptance test infrastructure (closes [#7](https://github.com/Daily-Nerd/terraform-provider-omada/issues/7)) ([d03db34](https://github.com/Daily-Nerd/terraform-provider-omada/commit/d03db3429956d30eb4c8b6d2a71165f32c5d27eb))
+* add lan_interface_ids field to omada_network (closes [#5](https://github.com/Daily-Nerd/terraform-provider-omada/issues/5)) ([3f7bbb0](https://github.com/Daily-Nerd/terraform-provider-omada/commit/3f7bbb0e29fc867901e8340fa85f68825d9bb54d))
+* add lan_interface_ids field to omada_network (closes [#5](https://github.com/Daily-Nerd/terraform-provider-omada/issues/5)) ([275b4f0](https://github.com/Daily-Nerd/terraform-provider-omada/commit/275b4f087d34e482f2949819b1bd93b1cf7ef0ab))
+* add omada_gateway_ports data source (closes [#6](https://github.com/Daily-Nerd/terraform-provider-omada/issues/6)) ([949e7a2](https://github.com/Daily-Nerd/terraform-provider-omada/commit/949e7a28d6cc5a4c34dc336e5e8f7effc6db4d0b))
+* add omada_gateway_ports data source (closes [#6](https://github.com/Daily-Nerd/terraform-provider-omada/issues/6)) ([90c4067](https://github.com/Daily-Nerd/terraform-provider-omada/commit/90c406754f69a45d2a21c73d437baceabcafe788))
+* **client:** lazy provider authentication ([ed5815f](https://github.com/Daily-Nerd/terraform-provider-omada/commit/ed5815fcdd59b34e9e19abed774ecf23cf0759b5)), closes [#24](https://github.com/Daily-Nerd/terraform-provider-omada/issues/24)
+* **client:** lazy provider authentication (closes [#24](https://github.com/Daily-Nerd/terraform-provider-omada/issues/24)) ([75b71a8](https://github.com/Daily-Nerd/terraform-provider-omada/commit/75b71a881105eed7db54fd9a533d5b12aab0712d))
+* initial fork from emanuelbesliu/terraform-provider-tplink-omada v2.1.1 ([5a31cc7](https://github.com/Daily-Nerd/terraform-provider-omada/commit/5a31cc7f9abd4f33939689765d93d7f17bc56d42))
+* **network:** surface 14 controller-exposed fields ([a5a0303](https://github.com/Daily-Nerd/terraform-provider-omada/commit/a5a0303805064ffaf060599a0ed5eb97976f0a62)), closes [#15](https://github.com/Daily-Nerd/terraform-provider-omada/issues/15)
+* **network:** surface 14 missing controller fields (closes [#15](https://github.com/Daily-Nerd/terraform-provider-omada/issues/15)) ([3488872](https://github.com/Daily-Nerd/terraform-provider-omada/commit/3488872f6851e182a4b9de710937951da5a6cdce))
+* **port_profile:** plan-time warnings for Easy-Managed-ignored fields ([8a68a6d](https://github.com/Daily-Nerd/terraform-provider-omada/commit/8a68a6d5e30189d21b1fd4acf48eabdff1b53e88))
+* **port_profile:** plan-time warnings for Easy-Managed-ignored fields (Phase 2 of [#25](https://github.com/Daily-Nerd/terraform-provider-omada/issues/25)) ([26690e6](https://github.com/Daily-Nerd/terraform-provider-omada/commit/26690e6e6208532dd0f79b4de12c0cdd529f3e1b))
+* **port_profile:** surface 24+ controller-exposed fields ([14f0370](https://github.com/Daily-Nerd/terraform-provider-omada/commit/14f03702d8e2ab96e727c2f0cdf7c5c8ae632207)), closes [#22](https://github.com/Daily-Nerd/terraform-provider-omada/issues/22)
+* **port_profile:** surface 24+ missing controller fields (closes [#22](https://github.com/Daily-Nerd/terraform-provider-omada/issues/22)) ([731e098](https://github.com/Daily-Nerd/terraform-provider-omada/commit/731e098815dfca104e70d06d8d217939160594ab))
+* **switch_port:** per-port resource for switch port config (closes [#23](https://github.com/Daily-Nerd/terraform-provider-omada/issues/23)) ([6886371](https://github.com/Daily-Nerd/terraform-provider-omada/commit/68863719da5f450d70e6ec48b8bfd669ff6dfa34))
+* **switch_port:** per-port resource for switch port config (closes [#23](https://github.com/Daily-Nerd/terraform-provider-omada/issues/23)) ([94fbecc](https://github.com/Daily-Nerd/terraform-provider-omada/commit/94fbecca914a1d84763c9c91b6f95de12b2526c4))
+
+
+### Bug Fixes
+
+* data sources return empty list instead of null when controller has no items (closes [#16](https://github.com/Daily-Nerd/terraform-provider-omada/issues/16)) ([8ff43a3](https://github.com/Daily-Nerd/terraform-provider-omada/commit/8ff43a31ba964ab72387bf60167ea5838dd8f861))
+* data sources return empty list instead of null when controller has no items (closes [#16](https://github.com/Daily-Nerd/terraform-provider-omada/issues/16)) ([aabd76d](https://github.com/Daily-Nerd/terraform-provider-omada/commit/aabd76dc63db6b1af692575b2189714c7872d43b))
+* gofmt after module path rename ([36866fe](https://github.com/Daily-Nerd/terraform-provider-omada/commit/36866fe2d0b2d610d52994d2218fddef18d71404))
+* registry namespace must be 'daily-nerd/omada' (hyphen preserved) ([0ab19ab](https://github.com/Daily-Nerd/terraform-provider-omada/commit/0ab19abac562b0cc237817efe221edae3ee48d02))
+* run gofmt after module path rename ([0e9dfe4](https://github.com/Daily-Nerd/terraform-provider-omada/commit/0e9dfe41368163ad34a53bc12d69f18659a06761))
+* use correct registry namespace 'daily-nerd/omada' (hyphen) ([0dfca97](https://github.com/Daily-Nerd/terraform-provider-omada/commit/0dfca978d196908c8202049c3b1fdfacee2f7e08))
+
+
+### Miscellaneous Chores
+
+* pin first release to 0.1.0 ([0afc589](https://github.com/Daily-Nerd/terraform-provider-omada/commit/0afc5894c066bef23434ccbd48481cd1dd0fe1ff))
+
 ## [Unreleased] — Daily-Nerd fork
 
 ### Added
