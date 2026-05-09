@@ -7,6 +7,8 @@ import (
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -34,6 +36,24 @@ type NetworkResourceModel struct {
 	DHCPEnd         types.String `tfsdk:"dhcp_end"`
 	IGMPSnoopEnable types.Bool   `tfsdk:"igmp_snoop_enable"`
 	LanInterfaceIds types.List   `tfsdk:"lan_interface_ids"`
+
+	// Network-level attrs newly surfaced from the controller API.
+	Application        types.Int64 `tfsdk:"application"`
+	VlanType           types.Int64 `tfsdk:"vlan_type"`
+	Isolation          types.Bool  `tfsdk:"isolation"`
+	FastLeaveEnable    types.Bool  `tfsdk:"fast_leave_enable"`
+	MldSnoopEnable     types.Bool  `tfsdk:"mld_snoop_enable"`
+	DhcpV6GuardEnable  types.Bool  `tfsdk:"dhcpv6_guard_enable"`
+	DhcpGuardEnable    types.Bool  `tfsdk:"dhcp_guard_enable"`
+	DhcpL2RelayEnable  types.Bool  `tfsdk:"dhcp_l2_relay_enable"`
+	PortalEnable       types.Bool  `tfsdk:"portal_enable"`
+	AccessControlRule  types.Bool  `tfsdk:"access_control_rule_enable"`
+	RateLimitEnable    types.Bool  `tfsdk:"rate_limit_enable"`
+	ArpDetectionEnable types.Bool  `tfsdk:"arp_detection_enable"`
+
+	// DHCP-scoped extras
+	DHCPLeaseTime types.Int64  `tfsdk:"dhcp_lease_time"`
+	DHCPDnsSource types.String `tfsdk:"dhcp_dns_source"`
 }
 
 func NewNetworkResource() resource.Resource {
@@ -101,6 +121,88 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed:    true,
 				ElementType: types.StringType,
 			},
+			"application": schema.Int64Attribute{
+				Description: "Network application classification (controller-internal). Defaults to 0 (LAN). Change with caution — 1 typically maps to Guest.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(0),
+			},
+			"vlan_type": schema.Int64Attribute{
+				Description: "VLAN type variant: 0=standard, others reserved for voice/IPTV/etc.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(0),
+			},
+			"isolation": schema.BoolAttribute{
+				Description: "Enable client isolation within this network (intra-network client-to-client traffic is dropped).",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"fast_leave_enable": schema.BoolAttribute{
+				Description: "Enable IGMP fast-leave at the network/L3 level (distinct from the port_profile fast-leave field, which is L2/port-scoped).",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"mld_snoop_enable": schema.BoolAttribute{
+				Description: "Enable MLD snooping (IPv6 multicast) on this network.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"dhcpv6_guard_enable": schema.BoolAttribute{
+				Description: "Enable DHCPv6 guard. Drops rogue DHCPv6 server responses on this network.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"dhcp_guard_enable": schema.BoolAttribute{
+				Description: "Enable DHCPv4 guard. Drops rogue DHCPv4 server responses on this network.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"dhcp_l2_relay_enable": schema.BoolAttribute{
+				Description: "Enable DHCP Layer-2 relay on this network.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"portal_enable": schema.BoolAttribute{
+				Description: "Enable captive portal authentication on this network.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"access_control_rule_enable": schema.BoolAttribute{
+				Description: "Enable access control rules (firewall ACLs) on this network.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"rate_limit_enable": schema.BoolAttribute{
+				Description: "Enable rate limiting on this network.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"arp_detection_enable": schema.BoolAttribute{
+				Description: "Enable ARP attack detection (drops gratuitous / spoofed ARP packets).",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
+			"dhcp_lease_time": schema.Int64Attribute{
+				Description: "DHCP lease duration in minutes. Only applicable when DHCP is enabled. Controller default is 120 (2 hours) on most firmware.",
+				Optional:    true,
+				Computed:    true,
+			},
+			"dhcp_dns_source": schema.StringAttribute{
+				Description: "DHCP DNS source: 'auto' (use gateway-provided DNS) or 'manual' (use dhcpns1/dhcpns2 — note these specific fields are not yet surfaced in this schema). Only applicable when DHCP is enabled.",
+				Optional:    true,
+				Computed:    true,
+			},
 		},
 	}
 }
@@ -120,6 +222,122 @@ func (r *NetworkResource) Configure(_ context.Context, req resource.ConfigureReq
 	r.client = c
 }
 
+// buildNetworkFromModel converts the Terraform model into the API client
+// struct. Shared between Create and Update.
+func buildNetworkFromModel(ctx context.Context, m *NetworkResourceModel, diags *[]error) *client.Network {
+	network := &client.Network{
+		Name:               m.Name.ValueString(),
+		Vlan:               int(m.VlanID.ValueInt64()),
+		GatewaySubnet:      m.GatewaySubnet.ValueString(),
+		IGMPSnoopEnable:    m.IGMPSnoopEnable.ValueBool(),
+		Application:        int(m.Application.ValueInt64()),
+		VlanType:           int(m.VlanType.ValueInt64()),
+		Isolation:          m.Isolation.ValueBool(),
+		FastLeaveEnable:    m.FastLeaveEnable.ValueBool(),
+		MldSnoopEnable:     m.MldSnoopEnable.ValueBool(),
+		DhcpL2RelayEnable:  m.DhcpL2RelayEnable.ValueBool(),
+		Portal:             m.PortalEnable.ValueBool(),
+		AccessControlRule:  m.AccessControlRule.ValueBool(),
+		RateLimit:          m.RateLimitEnable.ValueBool(),
+		ArpDetectionEnable: m.ArpDetectionEnable.ValueBool(),
+		DhcpV6Guard:        &client.DhcpGuardSettings{Enable: m.DhcpV6GuardEnable.ValueBool()},
+		DhcpGuard:          &client.DhcpGuardSettings{Enable: m.DhcpGuardEnable.ValueBool()},
+	}
+	if !m.Purpose.IsNull() && !m.Purpose.IsUnknown() {
+		network.Purpose = m.Purpose.ValueString()
+	}
+	// DHCPSettings only built when dhcp_enabled is set explicitly. The
+	// controller treats the absence of dhcpSettings as "leave alone" on
+	// purpose=vlan networks; that's the safe default.
+	if !m.DHCPEnabled.IsNull() && !m.DHCPEnabled.IsUnknown() {
+		network.DHCPSettings = &client.DHCPSettings{
+			Enable:      m.DHCPEnabled.ValueBool(),
+			IPAddrStart: m.DHCPStart.ValueString(),
+			IPAddrEnd:   m.DHCPEnd.ValueString(),
+			LeaseTime:   int(m.DHCPLeaseTime.ValueInt64()),
+			DhcpNs:      m.DHCPDnsSource.ValueString(),
+		}
+	}
+	if !m.LanInterfaceIds.IsNull() && !m.LanInterfaceIds.IsUnknown() {
+		var ids []string
+		d := m.LanInterfaceIds.ElementsAs(ctx, &ids, false)
+		if d.HasError() {
+			for _, e := range d.Errors() {
+				*diags = append(*diags, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
+			}
+			return nil
+		}
+		network.InterfaceIds = ids
+	}
+	return network
+}
+
+// applyNetworkToModel writes the API client struct back into the Terraform
+// model. Shared between Read, Create-after-API-roundtrip, Update, ImportState.
+// Honors purpose=vlan semantics: gateway/dhcp fields stay null in that mode.
+func applyNetworkToModel(ctx context.Context, m *NetworkResourceModel, n *client.Network) error {
+	m.Name = types.StringValue(n.Name)
+	m.Purpose = types.StringValue(n.Purpose)
+	m.VlanID = types.Int64Value(int64(n.Vlan))
+	m.IGMPSnoopEnable = types.BoolValue(n.IGMPSnoopEnable)
+	m.Application = types.Int64Value(int64(n.Application))
+	m.VlanType = types.Int64Value(int64(n.VlanType))
+	m.Isolation = types.BoolValue(n.Isolation)
+	m.FastLeaveEnable = types.BoolValue(n.FastLeaveEnable)
+	m.MldSnoopEnable = types.BoolValue(n.MldSnoopEnable)
+	m.DhcpL2RelayEnable = types.BoolValue(n.DhcpL2RelayEnable)
+	m.PortalEnable = types.BoolValue(n.Portal)
+	m.AccessControlRule = types.BoolValue(n.AccessControlRule)
+	m.RateLimitEnable = types.BoolValue(n.RateLimit)
+	m.ArpDetectionEnable = types.BoolValue(n.ArpDetectionEnable)
+	if n.DhcpV6Guard != nil {
+		m.DhcpV6GuardEnable = types.BoolValue(n.DhcpV6Guard.Enable)
+	} else {
+		m.DhcpV6GuardEnable = types.BoolValue(false)
+	}
+	if n.DhcpGuard != nil {
+		m.DhcpGuardEnable = types.BoolValue(n.DhcpGuard.Enable)
+	} else {
+		m.DhcpGuardEnable = types.BoolValue(false)
+	}
+
+	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, n.InterfaceIds)
+	if diag.HasError() {
+		return fmt.Errorf("decoding interface_ids: %v", diag)
+	}
+	m.LanInterfaceIds = ifaceIDs
+
+	if n.Purpose == "vlan" {
+		m.GatewaySubnet = types.StringNull()
+		m.DHCPEnabled = types.BoolNull()
+		m.DHCPStart = types.StringNull()
+		m.DHCPEnd = types.StringNull()
+		m.DHCPLeaseTime = types.Int64Null()
+		m.DHCPDnsSource = types.StringNull()
+		return nil
+	}
+
+	m.GatewaySubnet = types.StringValue(n.GatewaySubnet)
+	if n.DHCPSettings != nil {
+		m.DHCPEnabled = types.BoolValue(n.DHCPSettings.Enable)
+		m.DHCPStart = types.StringValue(n.DHCPSettings.IPAddrStart)
+		m.DHCPEnd = types.StringValue(n.DHCPSettings.IPAddrEnd)
+		m.DHCPLeaseTime = types.Int64Value(int64(n.DHCPSettings.LeaseTime))
+		if n.DHCPSettings.DhcpNs != "" {
+			m.DHCPDnsSource = types.StringValue(n.DHCPSettings.DhcpNs)
+		} else {
+			m.DHCPDnsSource = types.StringNull()
+		}
+	} else {
+		m.DHCPEnabled = types.BoolNull()
+		m.DHCPStart = types.StringNull()
+		m.DHCPEnd = types.StringNull()
+		m.DHCPLeaseTime = types.Int64Null()
+		m.DHCPDnsSource = types.StringNull()
+	}
+	return nil
+}
+
 func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan NetworkResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -129,30 +347,13 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 
 	siteID := plan.SiteID.ValueString()
 
-	network := &client.Network{
-		Name:            plan.Name.ValueString(),
-		Vlan:            int(plan.VlanID.ValueInt64()),
-		GatewaySubnet:   plan.GatewaySubnet.ValueString(),
-		IGMPSnoopEnable: plan.IGMPSnoopEnable.ValueBool(),
-	}
-	if !plan.Purpose.IsNull() && !plan.Purpose.IsUnknown() {
-		network.Purpose = plan.Purpose.ValueString()
-	}
-	// Build DHCPSettings if any DHCP attributes are set
-	if !plan.DHCPEnabled.IsNull() && !plan.DHCPEnabled.IsUnknown() {
-		network.DHCPSettings = &client.DHCPSettings{
-			Enable:      plan.DHCPEnabled.ValueBool(),
-			IPAddrStart: plan.DHCPStart.ValueString(),
-			IPAddrEnd:   plan.DHCPEnd.ValueString(),
+	var buildErrs []error
+	network := buildNetworkFromModel(ctx, &plan, &buildErrs)
+	if len(buildErrs) > 0 {
+		for _, e := range buildErrs {
+			resp.Diagnostics.AddError("Building network payload", e.Error())
 		}
-	}
-	if !plan.LanInterfaceIds.IsNull() && !plan.LanInterfaceIds.IsUnknown() {
-		var ids []string
-		resp.Diagnostics.Append(plan.LanInterfaceIds.ElementsAs(ctx, &ids, false)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		network.InterfaceIds = ids
+		return
 	}
 
 	created, err := r.client.CreateNetwork(ctx, siteID, network)
@@ -162,28 +363,9 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	plan.ID = types.StringValue(created.ID)
-	plan.Purpose = types.StringValue(created.Purpose)
-	plan.IGMPSnoopEnable = types.BoolValue(created.IGMPSnoopEnable)
-	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, created.InterfaceIds)
-	resp.Diagnostics.Append(diag...)
-	plan.LanInterfaceIds = ifaceIDs
-
-	if created.Purpose == "vlan" {
-		plan.GatewaySubnet = types.StringNull()
-		plan.DHCPEnabled = types.BoolNull()
-		plan.DHCPStart = types.StringNull()
-		plan.DHCPEnd = types.StringNull()
-	} else {
-		plan.GatewaySubnet = types.StringValue(created.GatewaySubnet)
-		if created.DHCPSettings != nil {
-			plan.DHCPEnabled = types.BoolValue(created.DHCPSettings.Enable)
-			plan.DHCPStart = types.StringValue(created.DHCPSettings.IPAddrStart)
-			plan.DHCPEnd = types.StringValue(created.DHCPSettings.IPAddrEnd)
-		} else {
-			plan.DHCPEnabled = types.BoolNull()
-			plan.DHCPStart = types.StringNull()
-			plan.DHCPEnd = types.StringNull()
-		}
+	if err := applyNetworkToModel(ctx, &plan, created); err != nil {
+		resp.Diagnostics.AddError("Error decoding created network", err.Error())
+		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -204,30 +386,9 @@ func (r *NetworkResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	state.Name = types.StringValue(network.Name)
-	state.Purpose = types.StringValue(network.Purpose)
-	state.VlanID = types.Int64Value(int64(network.Vlan))
-	state.IGMPSnoopEnable = types.BoolValue(network.IGMPSnoopEnable)
-	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, network.InterfaceIds)
-	resp.Diagnostics.Append(diag...)
-	state.LanInterfaceIds = ifaceIDs
-
-	if network.Purpose == "vlan" {
-		state.GatewaySubnet = types.StringNull()
-		state.DHCPEnabled = types.BoolNull()
-		state.DHCPStart = types.StringNull()
-		state.DHCPEnd = types.StringNull()
-	} else {
-		state.GatewaySubnet = types.StringValue(network.GatewaySubnet)
-		if network.DHCPSettings != nil {
-			state.DHCPEnabled = types.BoolValue(network.DHCPSettings.Enable)
-			state.DHCPStart = types.StringValue(network.DHCPSettings.IPAddrStart)
-			state.DHCPEnd = types.StringValue(network.DHCPSettings.IPAddrEnd)
-		} else {
-			state.DHCPEnabled = types.BoolNull()
-			state.DHCPStart = types.StringNull()
-			state.DHCPEnd = types.StringNull()
-		}
+	if err := applyNetworkToModel(ctx, &state, network); err != nil {
+		resp.Diagnostics.AddError("Error decoding network", err.Error())
+		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -248,32 +409,15 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	siteID := state.SiteID.ValueString()
 
-	network := &client.Network{
-		ID:              state.ID.ValueString(),
-		Name:            plan.Name.ValueString(),
-		Vlan:            int(plan.VlanID.ValueInt64()),
-		GatewaySubnet:   plan.GatewaySubnet.ValueString(),
-		IGMPSnoopEnable: plan.IGMPSnoopEnable.ValueBool(),
-	}
-	if !plan.Purpose.IsNull() {
-		network.Purpose = plan.Purpose.ValueString()
-	}
-	// Build DHCPSettings if any DHCP attributes are set
-	if !plan.DHCPEnabled.IsNull() && !plan.DHCPEnabled.IsUnknown() {
-		network.DHCPSettings = &client.DHCPSettings{
-			Enable:      plan.DHCPEnabled.ValueBool(),
-			IPAddrStart: plan.DHCPStart.ValueString(),
-			IPAddrEnd:   plan.DHCPEnd.ValueString(),
+	var buildErrs []error
+	network := buildNetworkFromModel(ctx, &plan, &buildErrs)
+	if len(buildErrs) > 0 {
+		for _, e := range buildErrs {
+			resp.Diagnostics.AddError("Building network payload", e.Error())
 		}
+		return
 	}
-	if !plan.LanInterfaceIds.IsNull() && !plan.LanInterfaceIds.IsUnknown() {
-		var ids []string
-		resp.Diagnostics.Append(plan.LanInterfaceIds.ElementsAs(ctx, &ids, false)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		network.InterfaceIds = ids
-	}
+	network.ID = state.ID.ValueString()
 
 	updated, err := r.client.UpdateNetwork(ctx, siteID, state.ID.ValueString(), network)
 	if err != nil {
@@ -283,28 +427,9 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	plan.ID = state.ID
 	plan.SiteID = state.SiteID
-	plan.Purpose = types.StringValue(updated.Purpose)
-	plan.IGMPSnoopEnable = types.BoolValue(updated.IGMPSnoopEnable)
-	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, updated.InterfaceIds)
-	resp.Diagnostics.Append(diag...)
-	plan.LanInterfaceIds = ifaceIDs
-
-	if updated.Purpose == "vlan" {
-		plan.GatewaySubnet = types.StringNull()
-		plan.DHCPEnabled = types.BoolNull()
-		plan.DHCPStart = types.StringNull()
-		plan.DHCPEnd = types.StringNull()
-	} else {
-		plan.GatewaySubnet = types.StringValue(updated.GatewaySubnet)
-		if updated.DHCPSettings != nil {
-			plan.DHCPEnabled = types.BoolValue(updated.DHCPSettings.Enable)
-			plan.DHCPStart = types.StringValue(updated.DHCPSettings.IPAddrStart)
-			plan.DHCPEnd = types.StringValue(updated.DHCPSettings.IPAddrEnd)
-		} else {
-			plan.DHCPEnabled = types.BoolNull()
-			plan.DHCPStart = types.StringNull()
-			plan.DHCPEnd = types.StringNull()
-		}
+	if err := applyNetworkToModel(ctx, &plan, updated); err != nil {
+		resp.Diagnostics.AddError("Error decoding updated network", err.Error())
+		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -340,35 +465,13 @@ func (r *NetworkResource) ImportState(ctx context.Context, req resource.ImportSt
 		return
 	}
 
-	ifaceIDs, diag := types.ListValueFrom(ctx, types.StringType, network.InterfaceIds)
-	resp.Diagnostics.Append(diag...)
-
 	state := NetworkResourceModel{
-		ID:              types.StringValue(network.ID),
-		SiteID:          types.StringValue(siteID),
-		Name:            types.StringValue(network.Name),
-		Purpose:         types.StringValue(network.Purpose),
-		VlanID:          types.Int64Value(int64(network.Vlan)),
-		IGMPSnoopEnable: types.BoolValue(network.IGMPSnoopEnable),
-		LanInterfaceIds: ifaceIDs,
+		ID:     types.StringValue(network.ID),
+		SiteID: types.StringValue(siteID),
 	}
-
-	if network.Purpose == "vlan" {
-		state.GatewaySubnet = types.StringNull()
-		state.DHCPEnabled = types.BoolNull()
-		state.DHCPStart = types.StringNull()
-		state.DHCPEnd = types.StringNull()
-	} else {
-		state.GatewaySubnet = types.StringValue(network.GatewaySubnet)
-		if network.DHCPSettings != nil {
-			state.DHCPEnabled = types.BoolValue(network.DHCPSettings.Enable)
-			state.DHCPStart = types.StringValue(network.DHCPSettings.IPAddrStart)
-			state.DHCPEnd = types.StringValue(network.DHCPSettings.IPAddrEnd)
-		} else {
-			state.DHCPEnabled = types.BoolNull()
-			state.DHCPStart = types.StringNull()
-			state.DHCPEnd = types.StringNull()
-		}
+	if err := applyNetworkToModel(ctx, &state, network); err != nil {
+		resp.Diagnostics.AddError("Error decoding imported network", err.Error())
+		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)

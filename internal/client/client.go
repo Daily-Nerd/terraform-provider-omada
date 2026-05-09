@@ -103,12 +103,30 @@ type SiteSettingFields struct {
 	Scenario string `json:"scenario,omitempty"`
 }
 
+// DhcpIPRange is a single start/end pair inside a multi-range DHCP pool.
+type DhcpIPRange struct {
+	IPAddrStart string `json:"ipaddrStart"`
+	IPAddrEnd   string `json:"ipaddrEnd"`
+}
+
 // DHCPSettings holds DHCP server configuration for a network.
 type DHCPSettings struct {
 	Enable      bool   `json:"enable"`
 	IPAddrStart string `json:"ipaddrStart,omitempty"`
 	IPAddrEnd   string `json:"ipaddrEnd,omitempty"`
 	LeaseTime   int    `json:"leasetime,omitempty"`
+	// DhcpNs is the DNS source: "auto" (use gateway DNS) or "manual"
+	// (use dhcpns1/dhcpns2 fields). Optional — controller defaults to "auto".
+	DhcpNs string `json:"dhcpns,omitempty"`
+	// IPRangePool enables multiple IP range pools per DHCP scope. Mutually
+	// exclusive with the single IPAddrStart/IPAddrEnd pair on some
+	// firmware versions; consult controller behavior before mixing.
+	IPRangePool []DhcpIPRange `json:"ipRangePool,omitempty"`
+}
+
+// DhcpGuardSettings holds DHCP guard toggles (DHCPv4 or DHCPv6).
+type DhcpGuardSettings struct {
+	Enable bool `json:"enable"`
 }
 
 // Network represents a LAN network / VLAN configuration.
@@ -126,6 +144,33 @@ type Network struct {
 	// Required by the controller for purpose=interface networks once a
 	// gateway is adopted; absence triggers API error -33515.
 	InterfaceIds []string `json:"interfaceIds,omitempty"`
+
+	// Application is the network application type (controller-internal
+	// classification, e.g. 0=lan, 1=guest). Defaults to 0 — change with
+	// caution.
+	Application int `json:"application"`
+	// VlanType is the VLAN type variant: 0=standard, others reserved for
+	// voice / IPTV / etc.
+	VlanType int `json:"vlanType"`
+
+	// FastLeaveEnable enables IGMP fast-leave on this network. Distinct
+	// from the port_profile field of the same name — this is L3 / network-
+	// scoped, the port_profile field is L2 / port-scoped.
+	FastLeaveEnable bool `json:"fastLeaveEnable"`
+	// MldSnoopEnable enables MLD snooping (IPv6 multicast) on this network.
+	MldSnoopEnable bool `json:"mldSnoopEnable"`
+
+	// DHCP guard nested toggles. Both unconditionally serialized so the
+	// controller never sees a missing key.
+	DhcpV6Guard       *DhcpGuardSettings `json:"dhcpv6Guard,omitempty"`
+	DhcpGuard         *DhcpGuardSettings `json:"dhcpGuard,omitempty"`
+	DhcpL2RelayEnable bool               `json:"dhcpL2RelayEnable"`
+
+	// Feature toggles
+	Portal             bool `json:"portal"`
+	AccessControlRule  bool `json:"accessControlRule"`
+	RateLimit          bool `json:"rateLimit"`
+	ArpDetectionEnable bool `json:"arpDetectionEnable"`
 }
 
 // WlanGroup represents a wireless LAN group.
