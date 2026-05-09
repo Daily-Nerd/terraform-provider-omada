@@ -7,7 +7,7 @@
 ### Added
 - Forked from `emanuelbesliu/terraform-provider-tplink-omada` v2.1.1 (commit `9398b07`, 2026-04-09).
 - Renamed Go module path to `github.com/Daily-Nerd/terraform-provider-omada`.
-- Renamed Terraform Registry address to `dailynerd/omada`.
+- Renamed Terraform Registry address to `daily-nerd/omada`.
 - Renamed binary to `terraform-provider-omada`.
 - Added MPL 2.0 LICENSE (upstream had no LICENSE file).
 - Added NOTICE attributing upstream and recording fork lineage.

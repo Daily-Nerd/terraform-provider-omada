@@ -24,7 +24,7 @@ Add to `~/.terraformrc`:
 ```hcl
 provider_installation {
   dev_overrides {
-    "dailynerd/omada" = "/path/to/terraform-provider-omada"
+    "daily-nerd/omada" = "/path/to/terraform-provider-omada"
   }
   direct {}
 }
