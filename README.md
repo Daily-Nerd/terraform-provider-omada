@@ -59,7 +59,7 @@ Pre-release. Versioning starts at `0.1.0` to signal a different lineage from ups
 terraform {
   required_providers {
     omada = {
-      source  = "dailynerd/omada"
+      source  = "daily-nerd/omada"
       version = "~> 0.1"
     }
   }
@@ -81,7 +81,7 @@ Add to `~/.terraformrc`:
 ```hcl
 provider_installation {
   dev_overrides {
-    "dailynerd/omada" = "/path/to/terraform-provider-omada"
+    "daily-nerd/omada" = "/path/to/terraform-provider-omada"
   }
   direct {}
 }

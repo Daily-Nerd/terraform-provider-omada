@@ -43,7 +43,7 @@ This makes it safe to commit Terraform configs that reference the provider into 
 terraform {
   required_providers {
     omada = {
-      source = "dailynerd/omada"
+      source = "daily-nerd/omada"
     }
   }
 }

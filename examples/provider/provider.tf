@@ -1,7 +1,7 @@
 terraform {
   required_providers {
     omada = {
-      source = "dailynerd/omada"
+      source = "daily-nerd/omada"
     }
   }
 }
