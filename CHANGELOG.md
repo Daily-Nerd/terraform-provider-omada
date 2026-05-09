@@ -12,10 +12,26 @@
 - Added MPL 2.0 LICENSE (upstream had no LICENSE file).
 - Added NOTICE attributing upstream and recording fork lineage.
 
+### Added
+- `omada_port_profile` resource: surfaced 24+ previously-hidden controller fields. New top-level attributes:
+  `untag_network_ids`, `bandwidth_ctrl_type`, `eee_enable`, `flow_control_enable`,
+  `fast_leave_enable`, `loopback_detect_vlan_based_enable`, `igmp_fast_leave_enable`,
+  `mld_fast_leave_enable`, `dot1p_priority`, `trust_mode`, `dhcp_l2_relay_enable`.
+  Plus the full STP block flattened with `stp_` prefix: `stp_priority`, `stp_ext_path_cost`,
+  `stp_int_path_cost`, `stp_edge_port`, `stp_p2p_link`, `stp_mcheck`, `stp_loop_protect`,
+  `stp_root_protect`, `stp_tc_guard`, `stp_bpdu_protect`, `stp_bpdu_filter`,
+  `stp_bpdu_forward`. Defaults match the controller's observed defaults so existing profiles
+  round-trip cleanly. Easy Managed (Agile) switches silently ignore some of these — see #25.
+  Closes [#22](https://github.com/Daily-Nerd/terraform-provider-omada/issues/22).
+- `internal/resources/port_profile_test.go`: round-trip tests for `buildPortProfileFromModel`
+  and `applyPortProfileToModel`, including null-vs-empty-list preservation for both
+  `tag_network_ids` and `untag_network_ids`.
+
 ### Changed
 - **BEHAVIOR**: provider authentication is now lazy. The `Configure()` step no longer issues HTTP requests to `/api/info` or `/login`. Auth happens on the first real API call (resource read / write). `terraform validate` and `terraform plan` against configs whose resources resolve to `count = 0` or empty `for_each` no longer require controller credentials. Configuration errors (bad URL, bad credentials) surface at first API call instead of plan time. Closes [#24](https://github.com/Daily-Nerd/terraform-provider-omada/issues/24).
 - All non-site-scoped API methods (sites CRUD, SAML IdP / role CRUD, controller certificate setting) now route through a new `doGlobalRequest` helper that gates auth via `ensureAuth`. This eliminates a class of latent races where URL construction read `c.token` before authentication completed.
 - `UpdateSite` now uses the standard `doSiteRequest` helper instead of building its URL inline.
+- `omada_port_profile` Create/Update no longer hardcode `SpanningTreeSetting{Priority: 128, BpduForward: true}`. STP fields are user-controllable (with backward-compatible defaults). Migration: existing state will round-trip cleanly because controller defaults already match the prior hardcoded values.
 
 ### Planned for 0.1.0
 - Add `lan_interface_ids` field to `omada_network` resource (fixes `-33515 LAN interfaces could not be none` on create).
