@@ -51,6 +51,21 @@
 - `internal/resources/switch_port_test.go`: 4 round-trip tests covering the
   full PATCH payload, optional-field omission semantics, model apply, and
   null-vs-empty-list preservation.
+- `docs/SWITCH_CLASS_MATRIX.md`: per-switch-class compatibility matrix for
+  `omada_port_profile` fields. Documents which fields are silently ignored
+  on Easy Managed (Agile) and Easy Smart switches even though the controller
+  accepts the API request — based on UI evidence captured on a TL-SG3218
+  configured as Easy Managed. Closes Phase 1 of
+  [#25](https://github.com/Daily-Nerd/terraform-provider-omada/issues/25).
+  Phase 2 (plan-time soft warnings) and Phase 3 (opt-in hard validation)
+  remain tracked under #25.
+- `omada_port_profile` schema descriptions for `dot1x`, `lldp_med_enable`,
+  `bandwidth_ctrl_type`, `dot1p_priority`, `trust_mode`, `dhcp_l2_relay_enable`
+  now reference `docs/SWITCH_CLASS_MATRIX.md` so users see the caveat
+  inline.
+- `docs/CONTRIBUTING.md`: added switch-class compatibility section pointing
+  to the new matrix; added `omada_switch_port` row to the dev-controller
+  capability matrix.
 
 ### Changed
 - **BEHAVIOR**: provider authentication is now lazy. The `Configure()` step no longer issues HTTP requests to `/api/info` or `/login`. Auth happens on the first real API call (resource read / write). `terraform validate` and `terraform plan` against configs whose resources resolve to `count = 0` or empty `for_each` no longer require controller credentials. Configuration errors (bad URL, bad credentials) surface at first API call instead of plan time. Closes [#24](https://github.com/Daily-Nerd/terraform-provider-omada/issues/24).

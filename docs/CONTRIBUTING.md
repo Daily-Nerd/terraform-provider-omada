@@ -127,11 +127,18 @@ Helpers in `internal/provider/provider_acc_test.go`:
 | `omada_network` (`purpose=vlan`) | ✅ creates | ✅ creates | ✅ creates |
 | `omada_network` (`purpose=interface`) | ❌ -33515 | ❌ -33515 | ✅ requires `lan_interface_ids` |
 | `omada_wireless_network` | ✅ definition | ✅ definition | ✅ broadcasts |
-| `omada_port_profile` | ✅ definition | ✅ definition | ✅ assignment |
+| `omada_port_profile` | ✅ definition | ✅ definition | ✅ assignment (some fields silently ignored on Easy Managed switches — see below) |
 | `omada_device_switch` | ❌ no device | ❌ no device | ✅ requires adoption |
+| `omada_switch_port` | ❌ no device | ❌ no device | ✅ requires adoption |
 | `omada_firewall_acl` | partial | partial | full |
 
 `purpose=vlan` networks work everywhere because they're L2-only and don't need gateway binding. Use those as your default test fixture.
+
+### Switch class compatibility
+
+The Omada controller silently ignores certain `omada_port_profile` fields on Easy Managed (Agile) switches even though it accepts the API request. See [`docs/SWITCH_CLASS_MATRIX.md`](SWITCH_CLASS_MATRIX.md) for the per-class field-support matrix and the empirical evidence behind it.
+
+Notable exclusions on Easy Managed switches: `dot1x`, `lldp_med_enable`, `dot1p_priority`, `trust_mode`, `dhcp_l2_relay_enable`. If you're adding a port-profile feature, consult the matrix and flag the affected fields in their schema descriptions.
 
 ---
 
