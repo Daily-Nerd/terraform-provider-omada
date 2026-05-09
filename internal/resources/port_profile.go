@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -16,6 +17,7 @@ import (
 
 var _ resource.Resource = &PortProfileResource{}
 var _ resource.ResourceWithImportState = &PortProfileResource{}
+var _ resource.ResourceWithValidateConfig = &PortProfileResource{}
 
 type PortProfileResource struct {
 	client *client.Client
@@ -299,6 +301,116 @@ func (r *PortProfileResource) Configure(_ context.Context, req resource.Configur
 		return
 	}
 	r.client = c
+}
+
+// easyManagedIgnoredHint is the standard tail appended to every warning emitted
+// by ValidateConfig for fields known to be silently ignored on Easy Managed
+// (Agile) switches.
+const easyManagedIgnoredHint = "If this profile is attached only to Smart Managed switches, " +
+	"this warning is safe to ignore. See docs/SWITCH_CLASS_MATRIX.md for the " +
+	"full per-class field-support matrix and how to verify your switch's class."
+
+// easyManagedWarning is a single plan-time warning produced by the
+// Easy-Managed-aware config validator. The Field is the schema attribute
+// path (a single root attribute name for now), Detail is the body of the
+// warning. Both get appended to the standard `easyManagedIgnoredHint`
+// when surfaced via diagnostics.
+type easyManagedWarning struct {
+	Field  string
+	Detail string
+}
+
+// computeEasyManagedWarnings returns the list of warnings to emit for fields
+// the controller accepts but Easy Managed (Agile) switches silently ignore.
+// Pure function over the model — testable without a tfsdk Config harness.
+func computeEasyManagedWarnings(m *PortProfileResourceModel) []easyManagedWarning {
+	var out []easyManagedWarning
+
+	// dot1x: 0=port-based, 1=mac-based, 2=disabled (default).
+	// Active values (0, 1) intend to enforce 802.1X. Easy Managed silently drops.
+	if !m.Dot1x.IsNull() && !m.Dot1x.IsUnknown() && m.Dot1x.ValueInt64() != 2 {
+		out = append(out, easyManagedWarning{
+			Field: "dot1x",
+			Detail: "802.1X port authentication is not supported on Easy Managed switches. " +
+				"The controller accepts the setting but the switch never enforces it.",
+		})
+	}
+
+	// lldp_med_enable: both true and false are intent. Easy Managed lacks
+	// LLDP-MED entirely. Warn whenever the user explicitly sets it.
+	if !m.LLDPMedEnable.IsNull() && !m.LLDPMedEnable.IsUnknown() {
+		out = append(out, easyManagedWarning{
+			Field: "lldp_med_enable",
+			Detail: "LLDP-MED is not supported on Easy Managed switches. " +
+				"The controller accepts the toggle but the switch ignores it.",
+		})
+	}
+
+	// dot1p_priority: 0..7. Default 0 = no marking. 1..7 means active intent.
+	if !m.Dot1pPriority.IsNull() && !m.Dot1pPriority.IsUnknown() && m.Dot1pPriority.ValueInt64() != 0 {
+		out = append(out, easyManagedWarning{
+			Field:  "dot1p_priority",
+			Detail: "802.1p default priority is not supported on Easy Managed switches.",
+		})
+	}
+
+	// trust_mode: 0=untrusted (default), 1=trust 802.1p, 2=trust DSCP.
+	if !m.TrustMode.IsNull() && !m.TrustMode.IsUnknown() && m.TrustMode.ValueInt64() != 0 {
+		out = append(out, easyManagedWarning{
+			Field: "trust_mode",
+			Detail: "QoS trust mode is not supported on Easy Managed switches. " +
+				"Tagged traffic will not be reclassified per the trust setting.",
+		})
+	}
+
+	// dhcp_l2_relay_enable: default false. true is active intent.
+	if !m.DhcpL2RelayEnable.IsNull() && !m.DhcpL2RelayEnable.IsUnknown() && m.DhcpL2RelayEnable.ValueBool() {
+		out = append(out, easyManagedWarning{
+			Field: "dhcp_l2_relay_enable",
+			Detail: "DHCP Layer-2 relay is not supported on Easy Managed switches. " +
+				"DHCP traffic will pass through but option-82 information will not be inserted.",
+		})
+	}
+
+	// bandwidth_ctrl_type: 0=disabled (default), 1=rate-limit, 2=storm-control.
+	// Easy Managed has partial support — warn on non-default to surface caveat.
+	if !m.BandWidthCtrlType.IsNull() && !m.BandWidthCtrlType.IsUnknown() && m.BandWidthCtrlType.ValueInt64() != 0 {
+		out = append(out, easyManagedWarning{
+			Field: "bandwidth_ctrl_type",
+			Detail: "Bandwidth control may not behave as expected on Easy Managed switches. " +
+				"Specific support varies by switch model — verify in the controller UI.",
+		})
+	}
+
+	return out
+}
+
+// ValidateConfig emits plan-time warnings (never errors) when the user sets a
+// field that is silently ignored on Easy Managed (Agile) switches. Warnings
+// are non-blocking and do not stop the apply — they're informational signals
+// so users notice the controller-silent failure mode without having to debug
+// it after the fact.
+//
+// Why warnings instead of errors: a port profile may legitimately target only
+// Smart Managed switches in a heterogeneous environment, where these fields
+// are honored. Erroring would block valid configurations.
+//
+// This is the HashiCorp-documented pattern for "suboptimal situations and
+// possible unexpected behaviors" (Terraform Plugin Framework Diagnostics).
+func (r *PortProfileResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var data PortProfileResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	for _, w := range computeEasyManagedWarnings(&data) {
+		resp.Diagnostics.AddAttributeWarning(
+			path.Root(w.Field),
+			"Field silently ignored on Easy Managed (Agile) switches",
+			w.Detail+"\n\n"+easyManagedIgnoredHint,
+		)
+	}
 }
 
 // buildPortProfileFromModel converts the Terraform plan / state model into the

@@ -230,6 +230,151 @@ func TestPortProfile_ApplyToModel(t *testing.T) {
 	}
 }
 
+// TestPortProfile_EasyManagedWarnings_NoneOnDefaults verifies that an empty
+// model (all defaults / nulls) emits zero warnings. Default values are
+// no-ops on every switch class.
+func TestPortProfile_EasyManagedWarnings_NoneOnDefaults(t *testing.T) {
+	model := &PortProfileResourceModel{}
+	got := computeEasyManagedWarnings(model)
+	if len(got) != 0 {
+		t.Errorf("expected 0 warnings on empty model, got %d: %+v", len(got), got)
+	}
+}
+
+// TestPortProfile_EasyManagedWarnings_FiresOnExplicitActiveValues asserts
+// that each known-ignored field generates exactly one warning when set to a
+// non-default ("active") value. This is the load-bearing test for #25
+// Phase 2 — if a future schema change adds a new ignored field, this test
+// should be extended.
+func TestPortProfile_EasyManagedWarnings_FiresOnExplicitActiveValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      *PortProfileResourceModel
+		wantFields []string
+	}{
+		{
+			name:       "dot1x port-based fires",
+			model:      &PortProfileResourceModel{Dot1x: types.Int64Value(0)},
+			wantFields: []string{"dot1x"},
+		},
+		{
+			name:       "dot1x mac-based fires",
+			model:      &PortProfileResourceModel{Dot1x: types.Int64Value(1)},
+			wantFields: []string{"dot1x"},
+		},
+		{
+			name:       "dot1x disabled does NOT fire",
+			model:      &PortProfileResourceModel{Dot1x: types.Int64Value(2)},
+			wantFields: nil,
+		},
+		{
+			name:       "lldp_med_enable=true fires",
+			model:      &PortProfileResourceModel{LLDPMedEnable: types.BoolValue(true)},
+			wantFields: []string{"lldp_med_enable"},
+		},
+		{
+			name:       "lldp_med_enable=false also fires (explicit intent)",
+			model:      &PortProfileResourceModel{LLDPMedEnable: types.BoolValue(false)},
+			wantFields: []string{"lldp_med_enable"},
+		},
+		{
+			name:       "dot1p_priority=5 fires",
+			model:      &PortProfileResourceModel{Dot1pPriority: types.Int64Value(5)},
+			wantFields: []string{"dot1p_priority"},
+		},
+		{
+			name:       "dot1p_priority=0 does NOT fire",
+			model:      &PortProfileResourceModel{Dot1pPriority: types.Int64Value(0)},
+			wantFields: nil,
+		},
+		{
+			name:       "trust_mode=2 fires",
+			model:      &PortProfileResourceModel{TrustMode: types.Int64Value(2)},
+			wantFields: []string{"trust_mode"},
+		},
+		{
+			name:       "dhcp_l2_relay_enable=true fires",
+			model:      &PortProfileResourceModel{DhcpL2RelayEnable: types.BoolValue(true)},
+			wantFields: []string{"dhcp_l2_relay_enable"},
+		},
+		{
+			name:       "dhcp_l2_relay_enable=false does NOT fire",
+			model:      &PortProfileResourceModel{DhcpL2RelayEnable: types.BoolValue(false)},
+			wantFields: nil,
+		},
+		{
+			name:       "bandwidth_ctrl_type=1 fires",
+			model:      &PortProfileResourceModel{BandWidthCtrlType: types.Int64Value(1)},
+			wantFields: []string{"bandwidth_ctrl_type"},
+		},
+		{
+			name:       "bandwidth_ctrl_type=0 does NOT fire",
+			model:      &PortProfileResourceModel{BandWidthCtrlType: types.Int64Value(0)},
+			wantFields: nil,
+		},
+		{
+			name: "all-active model fires all 6 warnings",
+			model: &PortProfileResourceModel{
+				Dot1x:             types.Int64Value(0),
+				LLDPMedEnable:     types.BoolValue(true),
+				Dot1pPriority:     types.Int64Value(5),
+				TrustMode:         types.Int64Value(2),
+				DhcpL2RelayEnable: types.BoolValue(true),
+				BandWidthCtrlType: types.Int64Value(1),
+			},
+			wantFields: []string{
+				"dot1x",
+				"lldp_med_enable",
+				"dot1p_priority",
+				"trust_mode",
+				"dhcp_l2_relay_enable",
+				"bandwidth_ctrl_type",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeEasyManagedWarnings(tt.model)
+			gotFields := make([]string, 0, len(got))
+			for _, w := range got {
+				gotFields = append(gotFields, w.Field)
+			}
+			if len(gotFields) != len(tt.wantFields) {
+				t.Fatalf("got %d warnings %v, want %d %v",
+					len(gotFields), gotFields, len(tt.wantFields), tt.wantFields)
+			}
+			for i, want := range tt.wantFields {
+				if gotFields[i] != want {
+					t.Errorf("warning[%d] field = %q, want %q", i, gotFields[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestPortProfile_EasyManagedWarnings_DetailContainsField asserts each warning
+// detail string mentions the field's purpose so the message is actionable
+// without the user having to look up the field name.
+func TestPortProfile_EasyManagedWarnings_DetailContainsField(t *testing.T) {
+	model := &PortProfileResourceModel{
+		Dot1x:             types.Int64Value(0),
+		LLDPMedEnable:     types.BoolValue(true),
+		Dot1pPriority:     types.Int64Value(5),
+		TrustMode:         types.Int64Value(2),
+		DhcpL2RelayEnable: types.BoolValue(true),
+		BandWidthCtrlType: types.Int64Value(1),
+	}
+	for _, w := range computeEasyManagedWarnings(model) {
+		if w.Detail == "" {
+			t.Errorf("warning for %q has empty detail", w.Field)
+		}
+		if len(w.Detail) < 40 {
+			t.Errorf("warning for %q detail too short (%d chars): %q", w.Field, len(w.Detail), w.Detail)
+		}
+	}
+}
+
 // TestPortProfile_ApplyToModel_NullListsPreserved verifies the null-vs-empty
 // list preservation: when state has null tag/untag lists and API returns
 // empty lists, model stays null (no perpetual diff).
