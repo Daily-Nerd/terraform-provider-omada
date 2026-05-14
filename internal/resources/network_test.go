@@ -220,3 +220,118 @@ func TestNetwork_ApplyToModel_InterfacePurposeAllFields(t *testing.T) {
 		t.Errorf("DHCPDnsSource = %q, want manual", state.DHCPDnsSource.ValueString())
 	}
 }
+
+// TestNetwork_BuildFromModel_DhcpDefaultsWhenUnset asserts that
+// buildNetworkFromModel injects controller-friendly default values for
+// `leasetime` and `dhcpns` when DHCP is enabled but those fields are null
+// (i.e. unset by the caller). Without these defaults the controller
+// rejects the PATCH with API error -1001 because `omitempty` drops the
+// zero-value `leasetime: 0` and empty `dhcpns: ""`.
+//
+// Regression for: vlan->interface purpose flip on the live OC200 + ER707,
+// homelab-network PR #23 first apply.
+func TestNetwork_BuildFromModel_DhcpDefaultsWhenUnset(t *testing.T) {
+	ctx := context.Background()
+
+	ifaceIDs, _ := types.ListValueFrom(ctx, types.StringType, []string{"2_2b95"})
+
+	model := &NetworkResourceModel{
+		Name:               types.StringValue("cameras"),
+		Purpose:            types.StringValue("interface"),
+		VlanID:             types.Int64Value(60),
+		GatewaySubnet:      types.StringValue("10.10.60.1/24"),
+		DHCPEnabled:        types.BoolValue(true),
+		DHCPStart:          types.StringValue("10.10.60.100"),
+		DHCPEnd:            types.StringValue("10.10.60.250"),
+		// DHCPLeaseTime and DHCPDnsSource intentionally NOT set —
+		// simulates the conf/home.tfvars usage where these are Computed
+		// and unknown at plan time.
+		DHCPLeaseTime:      types.Int64Null(),
+		DHCPDnsSource:      types.StringNull(),
+		IGMPSnoopEnable:    types.BoolValue(false),
+		LanInterfaceIds:    ifaceIDs,
+		Application:        types.Int64Value(0),
+		VlanType:           types.Int64Value(0),
+		Isolation:          types.BoolValue(false),
+		FastLeaveEnable:    types.BoolValue(false),
+		MldSnoopEnable:     types.BoolValue(false),
+		DhcpV6GuardEnable:  types.BoolValue(false),
+		DhcpGuardEnable:    types.BoolValue(false),
+		DhcpL2RelayEnable:  types.BoolValue(false),
+		PortalEnable:       types.BoolValue(false),
+		AccessControlRule:  types.BoolValue(false),
+		RateLimitEnable:    types.BoolValue(false),
+		ArpDetectionEnable: types.BoolValue(false),
+	}
+
+	var buildErrs []error
+	got := buildNetworkFromModel(ctx, model, &buildErrs)
+	if len(buildErrs) > 0 {
+		t.Fatalf("buildNetworkFromModel errors: %v", buildErrs)
+	}
+	if got == nil || got.DHCPSettings == nil {
+		t.Fatal("DHCPSettings is nil — should be populated with defaults")
+	}
+
+	if got.DHCPSettings.LeaseTime != 120 {
+		t.Errorf("LeaseTime = %d, want 120 (controller default)", got.DHCPSettings.LeaseTime)
+	}
+	if got.DHCPSettings.DhcpNs != "auto" {
+		t.Errorf("DhcpNs = %q, want \"auto\" (controller default)", got.DHCPSettings.DhcpNs)
+	}
+	if !got.DHCPSettings.Enable {
+		t.Error("DHCPSettings.Enable should be true")
+	}
+	if got.DHCPSettings.IPAddrStart != "10.10.60.100" || got.DHCPSettings.IPAddrEnd != "10.10.60.250" {
+		t.Errorf("DHCP range wrong: %+v", got.DHCPSettings)
+	}
+}
+
+// TestNetwork_BuildFromModel_DhcpDefaultsRespectExplicitValues asserts
+// that explicit user-supplied values for leasetime and dhcpns are NOT
+// overridden by the default-injection logic. Defaults only fire when
+// the field is zero/empty.
+func TestNetwork_BuildFromModel_DhcpDefaultsRespectExplicitValues(t *testing.T) {
+	ctx := context.Background()
+
+	ifaceIDs, _ := types.ListValueFrom(ctx, types.StringType, []string{"2_2b95"})
+
+	model := &NetworkResourceModel{
+		Name:               types.StringValue("servers"),
+		Purpose:            types.StringValue("interface"),
+		VlanID:             types.Int64Value(70),
+		GatewaySubnet:      types.StringValue("10.10.70.1/24"),
+		DHCPEnabled:        types.BoolValue(true),
+		DHCPStart:          types.StringValue("10.10.70.100"),
+		DHCPEnd:            types.StringValue("10.10.70.250"),
+		DHCPLeaseTime:      types.Int64Value(14400), // explicit
+		DHCPDnsSource:      types.StringValue("manual"),
+		IGMPSnoopEnable:    types.BoolValue(false),
+		LanInterfaceIds:    ifaceIDs,
+		Application:        types.Int64Value(0),
+		VlanType:           types.Int64Value(0),
+		Isolation:          types.BoolValue(false),
+		FastLeaveEnable:    types.BoolValue(false),
+		MldSnoopEnable:     types.BoolValue(false),
+		DhcpV6GuardEnable:  types.BoolValue(false),
+		DhcpGuardEnable:    types.BoolValue(false),
+		DhcpL2RelayEnable:  types.BoolValue(false),
+		PortalEnable:       types.BoolValue(false),
+		AccessControlRule:  types.BoolValue(false),
+		RateLimitEnable:    types.BoolValue(false),
+		ArpDetectionEnable: types.BoolValue(false),
+	}
+
+	var buildErrs []error
+	got := buildNetworkFromModel(ctx, model, &buildErrs)
+	if len(buildErrs) > 0 || got == nil || got.DHCPSettings == nil {
+		t.Fatalf("buildNetworkFromModel failed: errs=%v got=%v", buildErrs, got)
+	}
+
+	if got.DHCPSettings.LeaseTime != 14400 {
+		t.Errorf("LeaseTime = %d, want 14400 (user-supplied, must not be overridden)", got.DHCPSettings.LeaseTime)
+	}
+	if got.DHCPSettings.DhcpNs != "manual" {
+		t.Errorf("DhcpNs = %q, want \"manual\" (user-supplied, must not be overridden)", got.DHCPSettings.DhcpNs)
+	}
+}

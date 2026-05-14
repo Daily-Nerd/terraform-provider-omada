@@ -249,13 +249,42 @@ func buildNetworkFromModel(ctx context.Context, m *NetworkResourceModel, diags *
 	// DHCPSettings only built when dhcp_enabled is set explicitly. The
 	// controller treats the absence of dhcpSettings as "leave alone" on
 	// purpose=vlan networks; that's the safe default.
+	//
+	// When DHCP is ENABLED but leasetime or dhcpns are unset (null/unknown),
+	// inject the controller's own default values so the PATCH body is
+	// well-formed. Empirically: the controller rejects PATCH bodies with
+	// dhcpSettings.enable=true but missing leasetime/dhcpns with API error
+	// -1001 ("Invalid request parameters"). Captured against ER707 + OC200
+	// — see dist/api-discover/networks-lan.json for the reference values.
+	//
+	// Injection is intentionally apply-time (not a schema-level Default) to
+	// avoid the inconsistent-result-after-apply trap (see #40): the static
+	// default would collide with whatever the controller actually stores if
+	// it differs.
 	if !m.DHCPEnabled.IsNull() && !m.DHCPEnabled.IsUnknown() {
+		enabled := m.DHCPEnabled.ValueBool()
+		leaseTime := int(m.DHCPLeaseTime.ValueInt64())
+		dhcpNs := m.DHCPDnsSource.ValueString()
+		if enabled {
+			if leaseTime == 0 {
+				// Omada controller's documented LAN DHCP default lease time
+				// (minutes). The "Default" network ships with this value
+				// out of the box on OC200 + ER707.
+				leaseTime = 120
+			}
+			if dhcpNs == "" {
+				// "auto" = inherit gateway DNS. "manual" requires extra
+				// fields (dhcpns1, dhcpns2). "auto" is the safe default
+				// and matches the controller's out-of-box behavior.
+				dhcpNs = "auto"
+			}
+		}
 		network.DHCPSettings = &client.DHCPSettings{
-			Enable:      m.DHCPEnabled.ValueBool(),
+			Enable:      enabled,
 			IPAddrStart: m.DHCPStart.ValueString(),
 			IPAddrEnd:   m.DHCPEnd.ValueString(),
-			LeaseTime:   int(m.DHCPLeaseTime.ValueInt64()),
-			DhcpNs:      m.DHCPDnsSource.ValueString(),
+			LeaseTime:   leaseTime,
+			DhcpNs:      dhcpNs,
 		}
 	}
 	if !m.LanInterfaceIds.IsNull() && !m.LanInterfaceIds.IsUnknown() {
