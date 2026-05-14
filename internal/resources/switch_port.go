@@ -10,7 +10,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -123,10 +122,11 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			},
 			"network_tags_setting": schema.Int64Attribute{
 				Description: "VLAN tagging mode: 0=general (controller default), 1=trunk, 2=access. " +
-					"Only honored when `profile_override_enable=true`.",
+					"Only honored when `profile_override_enable=true`. When override is off, " +
+					"the controller derives this value from the port profile and a user-supplied " +
+					"value is ignored — leave unset to track the controller's value cleanly.",
 				Optional: true,
 				Computed: true,
-				Default:  int64default.StaticInt64(0),
 			},
 			"tag_network_ids": schema.ListAttribute{
 				Description: "List of tagged VLAN network IDs. Only honored when " +
@@ -157,10 +157,11 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"speed": schema.Int64Attribute{
 				Description: "Port speed code: 0=auto-negotiate, 1=10Mb HD, 2=10Mb FD, 3=100Mb HD, " +
 					"4=100Mb FD, 5=1Gb FD, 6=2.5Gb FD, 7=5Gb FD, 8=10Gb FD. Specific code support " +
-					"depends on the switch model.",
+					"depends on the switch model. Leave unset to accept the controller's reported " +
+					"value (avoids plan/apply drift). Suspected to behave as a status field on read " +
+					"— see GitHub issue #40 for the API discovery thread.",
 				Optional: true,
 				Computed: true,
-				Default:  int64default.StaticInt64(0),
 			},
 		},
 	}
