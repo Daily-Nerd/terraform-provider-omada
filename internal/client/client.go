@@ -704,10 +704,10 @@ type InterfaceNetworkCreateRequest struct {
 // InterfaceDeviceConfig holds device-level settings + the device list with
 // gateway MAC and port selections.
 type InterfaceDeviceConfig struct {
-	PortIsolationEnable bool                    `json:"portIsolationEnable"`
-	FlowControlEnable   bool                    `json:"flowControlEnable"`
-	DeviceList          []InterfaceDeviceEntry  `json:"deviceList"`
-	TagIDs              []string                `json:"tagIds"`
+	PortIsolationEnable bool                   `json:"portIsolationEnable"`
+	FlowControlEnable   bool                   `json:"flowControlEnable"`
+	DeviceList          []InterfaceDeviceEntry `json:"deviceList"`
+	TagIDs              []string               `json:"tagIds"`
 }
 
 // InterfaceDeviceEntry describes the gateway and the ports the new network
@@ -721,23 +721,23 @@ type InterfaceDeviceEntry struct {
 
 // InterfaceLanNetwork carries the L3 network parameters.
 type InterfaceLanNetwork struct {
-	Name                 string                  `json:"name"`
-	DeviceMac            string                  `json:"deviceMac"`
-	DeviceType           int                     `json:"deviceType"`
-	VlanType             int                     `json:"vlanType"`
-	Vlan                 int                     `json:"vlan"`
-	GatewaySubnet        string                  `json:"gatewaySubnet"`
-	DHCPSettings         *InterfaceDHCPSettings  `json:"dhcpSettings,omitempty"`
-	UpnpLanEnable        bool                    `json:"upnpLanEnable"`
-	IGMPSnoopEnable      bool                    `json:"igmpSnoopEnable"`
-	DhcpGuard            DhcpGuardSettings       `json:"dhcpGuard"`
-	DhcpV6Guard          DhcpGuardSettings       `json:"dhcpv6Guard"`
-	LanNetworkIPv6Config LanNetworkIPv6Config    `json:"lanNetworkIpv6Config"`
-	QosQueueEnable       bool                    `json:"qosQueueEnable"`
-	Isolation            bool                    `json:"isolation"`
-	MldSnoopEnable       bool                    `json:"mldSnoopEnable"`
-	ArpDetectionEnable   bool                    `json:"arpDetectionEnable"`
-	DhcpL2RelayEnable    bool                    `json:"dhcpL2RelayEnable"`
+	Name                 string                 `json:"name"`
+	DeviceMac            string                 `json:"deviceMac"`
+	DeviceType           int                    `json:"deviceType"`
+	VlanType             int                    `json:"vlanType"`
+	Vlan                 int                    `json:"vlan"`
+	GatewaySubnet        string                 `json:"gatewaySubnet"`
+	DHCPSettings         *InterfaceDHCPSettings `json:"dhcpSettings,omitempty"`
+	UpnpLanEnable        bool                   `json:"upnpLanEnable"`
+	IGMPSnoopEnable      bool                   `json:"igmpSnoopEnable"`
+	DhcpGuard            DhcpGuardSettings      `json:"dhcpGuard"`
+	DhcpV6Guard          DhcpGuardSettings      `json:"dhcpv6Guard"`
+	LanNetworkIPv6Config LanNetworkIPv6Config   `json:"lanNetworkIpv6Config"`
+	QosQueueEnable       bool                   `json:"qosQueueEnable"`
+	Isolation            bool                   `json:"isolation"`
+	MldSnoopEnable       bool                   `json:"mldSnoopEnable"`
+	ArpDetectionEnable   bool                   `json:"arpDetectionEnable"`
+	DhcpL2RelayEnable    bool                   `json:"dhcpL2RelayEnable"`
 }
 
 // InterfaceDHCPSettings is the openapi/v1 DHCP shape — uses ipRangePool
@@ -771,6 +771,7 @@ type InterfaceNetworkCreateResult struct {
 //   - Csrf-Token (same as legacy)
 //   - Omada-Request-Source: web-local (REQUIRED — without it, returns -44116)
 //   - X-Requested-With: XMLHttpRequest
+//
 // And does NOT use the ?token= query param.
 func (c *Client) CreateInterfaceNetwork(ctx context.Context, siteID string, req *InterfaceNetworkCreateRequest) (*Network, error) {
 	// Adopt pattern: check for an existing network with the same name.

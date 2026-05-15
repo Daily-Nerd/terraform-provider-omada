@@ -236,13 +236,13 @@ func TestNetwork_BuildFromModel_DhcpDefaultsWhenUnset(t *testing.T) {
 	ifaceIDs, _ := types.ListValueFrom(ctx, types.StringType, []string{"2_2b95"})
 
 	model := &NetworkResourceModel{
-		Name:               types.StringValue("cameras"),
-		Purpose:            types.StringValue("interface"),
-		VlanID:             types.Int64Value(60),
-		GatewaySubnet:      types.StringValue("10.10.60.1/24"),
-		DHCPEnabled:        types.BoolValue(true),
-		DHCPStart:          types.StringValue("10.10.60.100"),
-		DHCPEnd:            types.StringValue("10.10.60.250"),
+		Name:          types.StringValue("cameras"),
+		Purpose:       types.StringValue("interface"),
+		VlanID:        types.Int64Value(60),
+		GatewaySubnet: types.StringValue("10.10.60.1/24"),
+		DHCPEnabled:   types.BoolValue(true),
+		DHCPStart:     types.StringValue("10.10.60.100"),
+		DHCPEnd:       types.StringValue("10.10.60.250"),
 		// DHCPLeaseTime and DHCPDnsSource intentionally NOT set —
 		// simulates the conf/home.tfvars usage where these are Computed
 		// and unknown at plan time.
