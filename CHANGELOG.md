@@ -2,6 +2,22 @@
 
 > **Fork point.** This changelog continues from `emanuelbesliu/terraform-provider-tplink-omada` v2.1.1. The Daily-Nerd fork resets versioning to `0.x.y` to signal a different lineage. Upstream history is preserved below for reference.
 
+## [0.2.0](https://github.com/Daily-Nerd/terraform-provider-omada/compare/v0.1.0...v0.2.0) (2026-05-15)
+
+
+### Features
+
+* **network:** create purpose=interface networks via v6 openapi/v1 endpoint ([03d18fa](https://github.com/Daily-Nerd/terraform-provider-omada/commit/03d18faaad06cbd18c694b80d070711a8be7e313))
+
+
+### Bug Fixes
+
+* **network:** DHCP defaults ([#43](https://github.com/Daily-Nerd/terraform-provider-omada/issues/43)) + purpose RequiresReplace ([#45](https://github.com/Daily-Nerd/terraform-provider-omada/issues/45)) ([372707a](https://github.com/Daily-Nerd/terraform-provider-omada/commit/372707adb2b9768ca93ca021a8e8960fb04ce2ea))
+* **network:** inject DHCP defaults to avoid API -1001 on interface flip ([039fbdd](https://github.com/Daily-Nerd/terraform-provider-omada/commit/039fbddd217eb16ada5df16d55ee8932df4e6ff2))
+* **network:** mark `purpose` as RequiresReplace ([88487b3](https://github.com/Daily-Nerd/terraform-provider-omada/commit/88487b3f5626efbaf1ca23252448f2013a3f2585))
+* **switch_port:** drop static defaults on speed and network_tags_setting ([f49af2e](https://github.com/Daily-Nerd/terraform-provider-omada/commit/f49af2e35c894c012fc9bccd5c6df3c5d7292d28))
+* **switch_port:** drop static defaults on speed and network_tags_setting ([fb0fabe](https://github.com/Daily-Nerd/terraform-provider-omada/commit/fb0fabec1ee7f1c1f5cfcf052d409cc806135d78))
+
 ## 0.1.0 (2026-05-09)
 
 
