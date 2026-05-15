@@ -81,10 +81,17 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Required:    true,
 			},
 			"purpose": schema.StringAttribute{
-				Description: "The purpose of the network ('interface' for gateway networks, 'vlan' for VLAN-only).",
-				Optional:    true,
-				Computed:    true,
-				Default:     stringdefault.StaticString("vlan"),
+				Description: "The purpose of the network ('interface' for gateway networks, 'vlan' for VLAN-only). " +
+					"NOT migratable after creation — empirically the Omada controller returns API -1 General error " +
+					"when a `PATCH /setting/lan/networks/{id}` body changes `purpose` on an existing network, " +
+					"mirroring the OC200 UI which forces a delete+recreate to switch network type. The provider " +
+					"plans a destroy+create when this attribute changes.",
+				Optional: true,
+				Computed: true,
+				Default:  stringdefault.StaticString("vlan"),
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"vlan_id": schema.Int64Attribute{
 				Description: "The VLAN ID for the network (1-4094).",
