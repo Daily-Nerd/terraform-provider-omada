@@ -54,6 +54,13 @@ type NetworkResourceModel struct {
 	// DHCP-scoped extras
 	DHCPLeaseTime types.Int64  `tfsdk:"dhcp_lease_time"`
 	DHCPDnsSource types.String `tfsdk:"dhcp_dns_source"`
+
+	// GatewayMAC is the MAC address of the gateway device (e.g. ER707) that
+	// will host the L3 interface + DHCP for purpose=interface networks. Only
+	// consumed when purpose=interface — the openapi/v1 endpoint requires it
+	// to identify which device runs the routed VLAN. Format: dash-separated
+	// uppercase hex, e.g. "AC-A7-F1-12-0C-6B".
+	GatewayMAC types.String `tfsdk:"gateway_mac"`
 }
 
 func NewNetworkResource() resource.Resource {
@@ -209,6 +216,10 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Description: "DHCP DNS source: 'auto' (use gateway-provided DNS) or 'manual' (use dhcpns1/dhcpns2 — note these specific fields are not yet surfaced in this schema). Only applicable when DHCP is enabled.",
 				Optional:    true,
 				Computed:    true,
+			},
+			"gateway_mac": schema.StringAttribute{
+				Description: "MAC address of the gateway device (e.g. ER707) that will host the L3 interface + DHCP for this network. REQUIRED when purpose='interface' — the v6 controller's openapi/v1 endpoint needs it to identify which device runs the routed VLAN. Format: dash-separated uppercase hex, e.g. \"AC-A7-F1-12-0C-6B\". Ignored when purpose='vlan'.",
+				Optional:    true,
 			},
 		},
 	}
@@ -383,19 +394,31 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 
 	siteID := plan.SiteID.ValueString()
 
-	var buildErrs []error
-	network := buildNetworkFromModel(ctx, &plan, &buildErrs)
-	if len(buildErrs) > 0 {
-		for _, e := range buildErrs {
-			resp.Diagnostics.AddError("Building network payload", e.Error())
+	// Branch on purpose: interface networks use the v6 openapi/v1 endpoint
+	// (legacy /api/v2/setting/lan/networks POST cannot create L3 networks —
+	// it silently strips gatewaySubnet/dhcpSettings and returns purpose=vlan).
+	purpose := plan.Purpose.ValueString()
+	var created *client.Network
+	var err error
+	if purpose == "interface" {
+		created, err = r.createInterfaceNetwork(ctx, &plan, resp)
+		if err != nil {
+			return // diagnostics already added by helper
 		}
-		return
-	}
-
-	created, err := r.client.CreateNetwork(ctx, siteID, network)
-	if err != nil {
-		resp.Diagnostics.AddError("Error creating network", err.Error())
-		return
+	} else {
+		var buildErrs []error
+		network := buildNetworkFromModel(ctx, &plan, &buildErrs)
+		if len(buildErrs) > 0 {
+			for _, e := range buildErrs {
+				resp.Diagnostics.AddError("Building network payload", e.Error())
+			}
+			return
+		}
+		created, err = r.client.CreateNetwork(ctx, siteID, network)
+		if err != nil {
+			resp.Diagnostics.AddError("Error creating network", err.Error())
+			return
+		}
 	}
 
 	plan.ID = types.StringValue(created.ID)
@@ -405,6 +428,102 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// createInterfaceNetwork builds the openapi/v1 confirm body and creates an
+// L3 (purpose=interface) network. Returns the Network read back from the
+// legacy /api/v2 list. Requires plan.GatewayMAC to be set.
+func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *NetworkResourceModel, resp *resource.CreateResponse) (*client.Network, error) {
+	if plan.GatewayMAC.IsNull() || plan.GatewayMAC.IsUnknown() || plan.GatewayMAC.ValueString() == "" {
+		err := fmt.Errorf("gateway_mac is required when purpose=\"interface\"")
+		resp.Diagnostics.AddError("Missing gateway_mac",
+			"purpose=\"interface\" networks are created via the v6 openapi/v1 endpoint, which requires the gateway's MAC address. "+
+				"Set gateway_mac to the ER707 (or other gateway) MAC, e.g. \"AC-A7-F1-12-0C-6B\".")
+		return nil, err
+	}
+
+	var ports []string
+	if !plan.LanInterfaceIds.IsNull() && !plan.LanInterfaceIds.IsUnknown() {
+		d := plan.LanInterfaceIds.ElementsAs(ctx, &ports, false)
+		if d.HasError() {
+			for _, e := range d.Errors() {
+				resp.Diagnostics.AddError("Decoding lan_interface_ids", fmt.Sprintf("%s: %s", e.Summary(), e.Detail()))
+			}
+			return nil, fmt.Errorf("decoding lan_interface_ids")
+		}
+	}
+	if len(ports) == 0 {
+		err := fmt.Errorf("lan_interface_ids must contain at least one gateway LAN port")
+		resp.Diagnostics.AddError("Missing lan_interface_ids",
+			"purpose=\"interface\" networks require at least one gateway LAN port UUID in lan_interface_ids. "+
+				"Use data.omada_gateway_ports to discover valid IDs.")
+		return nil, err
+	}
+
+	dhcpEnabled := !plan.DHCPEnabled.IsNull() && plan.DHCPEnabled.ValueBool()
+	var dhcp *client.InterfaceDHCPSettings
+	if dhcpEnabled {
+		leaseTime := int(plan.DHCPLeaseTime.ValueInt64())
+		if leaseTime == 0 {
+			leaseTime = 120
+		}
+		dhcpNs := plan.DHCPDnsSource.ValueString()
+		if dhcpNs == "" {
+			dhcpNs = "auto"
+		}
+		dhcp = &client.InterfaceDHCPSettings{
+			Enable: true,
+			IPRangePool: []client.DhcpIPRange{{
+				IPAddrStart: plan.DHCPStart.ValueString(),
+				IPAddrEnd:   plan.DHCPEnd.ValueString(),
+			}},
+			DhcpNs:      dhcpNs,
+			LeaseTime:   leaseTime,
+			GatewayMode: "auto",
+			Options:     []interface{}{},
+		}
+	}
+
+	gwMAC := plan.GatewayMAC.ValueString()
+	body := &client.InterfaceNetworkCreateRequest{
+		DeviceConfig: client.InterfaceDeviceConfig{
+			PortIsolationEnable: false,
+			FlowControlEnable:   false,
+			DeviceList: []client.InterfaceDeviceEntry{{
+				Mac:   gwMAC,
+				Type:  1,
+				Ports: ports,
+				Lags:  []string{},
+			}},
+			TagIDs: []string{},
+		},
+		LanNetwork: client.InterfaceLanNetwork{
+			Name:                 plan.Name.ValueString(),
+			DeviceMac:            gwMAC,
+			DeviceType:           1,
+			VlanType:             int(plan.VlanType.ValueInt64()),
+			Vlan:                 int(plan.VlanID.ValueInt64()),
+			GatewaySubnet:        plan.GatewaySubnet.ValueString(),
+			DHCPSettings:         dhcp,
+			UpnpLanEnable:        false,
+			IGMPSnoopEnable:      plan.IGMPSnoopEnable.ValueBool(),
+			DhcpGuard:            client.DhcpGuardSettings{Enable: plan.DhcpGuardEnable.ValueBool()},
+			DhcpV6Guard:          client.DhcpGuardSettings{Enable: plan.DhcpV6GuardEnable.ValueBool()},
+			LanNetworkIPv6Config: client.LanNetworkIPv6Config{Proto: 0, Enable: 0},
+			QosQueueEnable:       false,
+			Isolation:            plan.Isolation.ValueBool(),
+			MldSnoopEnable:       plan.MldSnoopEnable.ValueBool(),
+			ArpDetectionEnable:   plan.ArpDetectionEnable.ValueBool(),
+			DhcpL2RelayEnable:    plan.DhcpL2RelayEnable.ValueBool(),
+		},
+	}
+
+	created, err := r.client.CreateInterfaceNetwork(ctx, plan.SiteID.ValueString(), body)
+	if err != nil {
+		resp.Diagnostics.AddError("Error creating interface network", err.Error())
+		return nil, err
+	}
+	return created, nil
 }
 
 func (r *NetworkResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
