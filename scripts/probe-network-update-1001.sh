@@ -110,20 +110,55 @@ echo "[5/6] Probe A: PATCH cameras with minimal body (provider current)" >&2
     > "$OUT_DIR/patch-min-response.json"
 jq '.' "$OUT_DIR/patch-min-response.json" >&2
 
-# Add leasetime + dhcpns
-PATCH_FULL=$(echo "$PATCH_MIN" | jq '.dhcpSettings.leasetime = 14400 | .dhcpSettings.dhcpns = "auto"')
+# Add leasetime + dhcpns. Use 120 (controller's documented default and
+# matches the "Default" network in the captured api-discover dump).
+# Controller rejects leasetime outside [2, 10080] minutes.
+PATCH_FULL=$(echo "$PATCH_MIN" | jq '.dhcpSettings.leasetime = 120 | .dhcpSettings.dhcpns = "auto"')
 echo "$PATCH_FULL" > "$OUT_DIR/patch-full-body.json"
 
-echo "[6/6] Probe B: PATCH cameras with leasetime + dhcpns added" >&2
+echo "[6/8] Probe B: PATCH cameras with leasetime=120 + dhcpns=auto added" >&2
 "${CURL[@]}" -X PATCH "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
     -H 'Content-Type: application/json' \
     -d "$PATCH_FULL" \
     > "$OUT_DIR/patch-full-response.json"
 jq '.' "$OUT_DIR/patch-full-response.json" >&2
 
+# Probe C: add allLan=false explicitly (current PATCH omits this — controller
+# may default to allLan=true and reject explicit interfaceIds binding when
+# Default already claims all-LAN-ports).
+PATCH_ALLLAN=$(echo "$PATCH_FULL" | jq '. + {allLan: false}')
+echo "$PATCH_ALLLAN" > "$OUT_DIR/patch-alllan-body.json"
+
+echo "[7/8] Probe C: same as B + allLan=false explicit" >&2
+"${CURL[@]}" -X PATCH "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
+    -H 'Content-Type: application/json' \
+    -d "$PATCH_ALLLAN" \
+    > "$OUT_DIR/patch-alllan-response.json"
+jq '.' "$OUT_DIR/patch-alllan-response.json" >&2
+
+# Probe D: add subnetOverride flags (Default network has subnetOverride=true,
+# subnetOverrideEnable=false). Speculative — may or may not be required.
+PATCH_SUBNET=$(echo "$PATCH_ALLLAN" | jq '. + {subnetOverride: true, subnetOverrideEnable: false}')
+echo "$PATCH_SUBNET" > "$OUT_DIR/patch-subnet-body.json"
+
+echo "[8/8] Probe D: + subnetOverride/subnetOverrideEnable" >&2
+"${CURL[@]}" -X PATCH "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
+    -H 'Content-Type: application/json' \
+    -d "$PATCH_SUBNET" \
+    > "$OUT_DIR/patch-subnet-response.json"
+jq '.' "$OUT_DIR/patch-subnet-response.json" >&2
+
 echo "" >&2
 echo "=== SUMMARY ===" >&2
-echo "Network list: $OUT_DIR/networks-list.json" >&2
-echo "Per-network detail: $OUT_DIR/network-detail-*.json" >&2
-echo "Probe A (minimal):   $OUT_DIR/patch-min-response.json" >&2
-echo "Probe B (with DHCP defaults): $OUT_DIR/patch-full-response.json" >&2
+echo "Network list:            $OUT_DIR/networks-list.json" >&2
+echo "Per-network detail:      $OUT_DIR/network-detail-*.json" >&2
+echo "Probe A (minimal):       $OUT_DIR/patch-min-response.json" >&2
+echo "Probe B (+leasetime120): $OUT_DIR/patch-full-response.json" >&2
+echo "Probe C (+allLan=false): $OUT_DIR/patch-alllan-response.json" >&2
+echo "Probe D (+subnetOverride): $OUT_DIR/patch-subnet-response.json" >&2
+
+# Final state of cameras after the probes
+echo "" >&2
+echo "[POST] Final state of cameras network:" >&2
+"${CURL[@]}" "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
+    | jq '{id, name, purpose, vlan, gatewaySubnet, dhcpSettings, interfaceIds, allLan, subnetOverride, subnetOverrideEnable}'
