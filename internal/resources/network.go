@@ -54,6 +54,13 @@ type NetworkResourceModel struct {
 	// DHCP-scoped extras
 	DHCPLeaseTime types.Int64  `tfsdk:"dhcp_lease_time"`
 	DHCPDnsSource types.String `tfsdk:"dhcp_dns_source"`
+
+	// GatewayMAC is the MAC address of the gateway device (e.g. ER707) that
+	// will host the L3 interface + DHCP for purpose=interface networks. Only
+	// consumed when purpose=interface — the openapi/v1 endpoint requires it
+	// to identify which device runs the routed VLAN. Format: dash-separated
+	// uppercase hex, e.g. "AC-A7-F1-12-0C-6B".
+	GatewayMAC types.String `tfsdk:"gateway_mac"`
 }
 
 func NewNetworkResource() resource.Resource {
@@ -81,10 +88,17 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Required:    true,
 			},
 			"purpose": schema.StringAttribute{
-				Description: "The purpose of the network ('interface' for gateway networks, 'vlan' for VLAN-only).",
-				Optional:    true,
-				Computed:    true,
-				Default:     stringdefault.StaticString("vlan"),
+				Description: "The purpose of the network ('interface' for gateway networks, 'vlan' for VLAN-only). " +
+					"NOT migratable after creation — empirically the Omada controller returns API -1 General error " +
+					"when a `PATCH /setting/lan/networks/{id}` body changes `purpose` on an existing network, " +
+					"mirroring the OC200 UI which forces a delete+recreate to switch network type. The provider " +
+					"plans a destroy+create when this attribute changes.",
+				Optional: true,
+				Computed: true,
+				Default:  stringdefault.StaticString("vlan"),
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"vlan_id": schema.Int64Attribute{
 				Description: "The VLAN ID for the network (1-4094).",
@@ -203,6 +217,10 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional:    true,
 				Computed:    true,
 			},
+			"gateway_mac": schema.StringAttribute{
+				Description: "MAC address of the gateway device (e.g. ER707) that will host the L3 interface + DHCP for this network. REQUIRED when purpose='interface' — the v6 controller's openapi/v1 endpoint needs it to identify which device runs the routed VLAN. Format: dash-separated uppercase hex, e.g. \"AC-A7-F1-12-0C-6B\". Ignored when purpose='vlan'.",
+				Optional:    true,
+			},
 		},
 	}
 }
@@ -249,13 +267,42 @@ func buildNetworkFromModel(ctx context.Context, m *NetworkResourceModel, diags *
 	// DHCPSettings only built when dhcp_enabled is set explicitly. The
 	// controller treats the absence of dhcpSettings as "leave alone" on
 	// purpose=vlan networks; that's the safe default.
+	//
+	// When DHCP is ENABLED but leasetime or dhcpns are unset (null/unknown),
+	// inject the controller's own default values so the PATCH body is
+	// well-formed. Empirically: the controller rejects PATCH bodies with
+	// dhcpSettings.enable=true but missing leasetime/dhcpns with API error
+	// -1001 ("Invalid request parameters"). Captured against ER707 + OC200
+	// — see dist/api-discover/networks-lan.json for the reference values.
+	//
+	// Injection is intentionally apply-time (not a schema-level Default) to
+	// avoid the inconsistent-result-after-apply trap (see #40): the static
+	// default would collide with whatever the controller actually stores if
+	// it differs.
 	if !m.DHCPEnabled.IsNull() && !m.DHCPEnabled.IsUnknown() {
+		enabled := m.DHCPEnabled.ValueBool()
+		leaseTime := int(m.DHCPLeaseTime.ValueInt64())
+		dhcpNs := m.DHCPDnsSource.ValueString()
+		if enabled {
+			if leaseTime == 0 {
+				// Omada controller's documented LAN DHCP default lease time
+				// (minutes). The "Default" network ships with this value
+				// out of the box on OC200 + ER707.
+				leaseTime = 120
+			}
+			if dhcpNs == "" {
+				// "auto" = inherit gateway DNS. "manual" requires extra
+				// fields (dhcpns1, dhcpns2). "auto" is the safe default
+				// and matches the controller's out-of-box behavior.
+				dhcpNs = "auto"
+			}
+		}
 		network.DHCPSettings = &client.DHCPSettings{
-			Enable:      m.DHCPEnabled.ValueBool(),
+			Enable:      enabled,
 			IPAddrStart: m.DHCPStart.ValueString(),
 			IPAddrEnd:   m.DHCPEnd.ValueString(),
-			LeaseTime:   int(m.DHCPLeaseTime.ValueInt64()),
-			DhcpNs:      m.DHCPDnsSource.ValueString(),
+			LeaseTime:   leaseTime,
+			DhcpNs:      dhcpNs,
 		}
 	}
 	if !m.LanInterfaceIds.IsNull() && !m.LanInterfaceIds.IsUnknown() {
@@ -347,19 +394,31 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 
 	siteID := plan.SiteID.ValueString()
 
-	var buildErrs []error
-	network := buildNetworkFromModel(ctx, &plan, &buildErrs)
-	if len(buildErrs) > 0 {
-		for _, e := range buildErrs {
-			resp.Diagnostics.AddError("Building network payload", e.Error())
+	// Branch on purpose: interface networks use the v6 openapi/v1 endpoint
+	// (legacy /api/v2/setting/lan/networks POST cannot create L3 networks —
+	// it silently strips gatewaySubnet/dhcpSettings and returns purpose=vlan).
+	purpose := plan.Purpose.ValueString()
+	var created *client.Network
+	var err error
+	if purpose == "interface" {
+		created, err = r.createInterfaceNetwork(ctx, &plan, resp)
+		if err != nil {
+			return // diagnostics already added by helper
 		}
-		return
-	}
-
-	created, err := r.client.CreateNetwork(ctx, siteID, network)
-	if err != nil {
-		resp.Diagnostics.AddError("Error creating network", err.Error())
-		return
+	} else {
+		var buildErrs []error
+		network := buildNetworkFromModel(ctx, &plan, &buildErrs)
+		if len(buildErrs) > 0 {
+			for _, e := range buildErrs {
+				resp.Diagnostics.AddError("Building network payload", e.Error())
+			}
+			return
+		}
+		created, err = r.client.CreateNetwork(ctx, siteID, network)
+		if err != nil {
+			resp.Diagnostics.AddError("Error creating network", err.Error())
+			return
+		}
 	}
 
 	plan.ID = types.StringValue(created.ID)
@@ -369,6 +428,102 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// createInterfaceNetwork builds the openapi/v1 confirm body and creates an
+// L3 (purpose=interface) network. Returns the Network read back from the
+// legacy /api/v2 list. Requires plan.GatewayMAC to be set.
+func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *NetworkResourceModel, resp *resource.CreateResponse) (*client.Network, error) {
+	if plan.GatewayMAC.IsNull() || plan.GatewayMAC.IsUnknown() || plan.GatewayMAC.ValueString() == "" {
+		err := fmt.Errorf("gateway_mac is required when purpose=\"interface\"")
+		resp.Diagnostics.AddError("Missing gateway_mac",
+			"purpose=\"interface\" networks are created via the v6 openapi/v1 endpoint, which requires the gateway's MAC address. "+
+				"Set gateway_mac to the ER707 (or other gateway) MAC, e.g. \"AC-A7-F1-12-0C-6B\".")
+		return nil, err
+	}
+
+	var ports []string
+	if !plan.LanInterfaceIds.IsNull() && !plan.LanInterfaceIds.IsUnknown() {
+		d := plan.LanInterfaceIds.ElementsAs(ctx, &ports, false)
+		if d.HasError() {
+			for _, e := range d.Errors() {
+				resp.Diagnostics.AddError("Decoding lan_interface_ids", fmt.Sprintf("%s: %s", e.Summary(), e.Detail()))
+			}
+			return nil, fmt.Errorf("decoding lan_interface_ids")
+		}
+	}
+	if len(ports) == 0 {
+		err := fmt.Errorf("lan_interface_ids must contain at least one gateway LAN port")
+		resp.Diagnostics.AddError("Missing lan_interface_ids",
+			"purpose=\"interface\" networks require at least one gateway LAN port UUID in lan_interface_ids. "+
+				"Use data.omada_gateway_ports to discover valid IDs.")
+		return nil, err
+	}
+
+	dhcpEnabled := !plan.DHCPEnabled.IsNull() && plan.DHCPEnabled.ValueBool()
+	var dhcp *client.InterfaceDHCPSettings
+	if dhcpEnabled {
+		leaseTime := int(plan.DHCPLeaseTime.ValueInt64())
+		if leaseTime == 0 {
+			leaseTime = 120
+		}
+		dhcpNs := plan.DHCPDnsSource.ValueString()
+		if dhcpNs == "" {
+			dhcpNs = "auto"
+		}
+		dhcp = &client.InterfaceDHCPSettings{
+			Enable: true,
+			IPRangePool: []client.DhcpIPRange{{
+				IPAddrStart: plan.DHCPStart.ValueString(),
+				IPAddrEnd:   plan.DHCPEnd.ValueString(),
+			}},
+			DhcpNs:      dhcpNs,
+			LeaseTime:   leaseTime,
+			GatewayMode: "auto",
+			Options:     []interface{}{},
+		}
+	}
+
+	gwMAC := plan.GatewayMAC.ValueString()
+	body := &client.InterfaceNetworkCreateRequest{
+		DeviceConfig: client.InterfaceDeviceConfig{
+			PortIsolationEnable: false,
+			FlowControlEnable:   false,
+			DeviceList: []client.InterfaceDeviceEntry{{
+				Mac:   gwMAC,
+				Type:  1,
+				Ports: ports,
+				Lags:  []string{},
+			}},
+			TagIDs: []string{},
+		},
+		LanNetwork: client.InterfaceLanNetwork{
+			Name:                 plan.Name.ValueString(),
+			DeviceMac:            gwMAC,
+			DeviceType:           1,
+			VlanType:             int(plan.VlanType.ValueInt64()),
+			Vlan:                 int(plan.VlanID.ValueInt64()),
+			GatewaySubnet:        plan.GatewaySubnet.ValueString(),
+			DHCPSettings:         dhcp,
+			UpnpLanEnable:        false,
+			IGMPSnoopEnable:      plan.IGMPSnoopEnable.ValueBool(),
+			DhcpGuard:            client.DhcpGuardSettings{Enable: plan.DhcpGuardEnable.ValueBool()},
+			DhcpV6Guard:          client.DhcpGuardSettings{Enable: plan.DhcpV6GuardEnable.ValueBool()},
+			LanNetworkIPv6Config: client.LanNetworkIPv6Config{Proto: 0, Enable: 0},
+			QosQueueEnable:       false,
+			Isolation:            plan.Isolation.ValueBool(),
+			MldSnoopEnable:       plan.MldSnoopEnable.ValueBool(),
+			ArpDetectionEnable:   plan.ArpDetectionEnable.ValueBool(),
+			DhcpL2RelayEnable:    plan.DhcpL2RelayEnable.ValueBool(),
+		},
+	}
+
+	created, err := r.client.CreateInterfaceNetwork(ctx, plan.SiteID.ValueString(), body)
+	if err != nil {
+		resp.Diagnostics.AddError("Error creating interface network", err.Error())
+		return nil, err
+	}
+	return created, nil
 }
 
 func (r *NetworkResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {

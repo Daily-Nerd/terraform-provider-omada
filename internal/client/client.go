@@ -686,6 +686,172 @@ func (c *Client) GetNetwork(ctx context.Context, siteID, networkID string) (*Net
 
 // CreateNetwork creates a new LAN network, or adopts an existing one with the
 // same name (the controller auto-creates a "Default" network on site creation).
+// InterfaceNetworkCreateRequest is the body for POST
+// /openapi/v1/{omadacId}/sites/{siteId}/networks/confirm — the v6 endpoint
+// that creates `purpose=interface` (L3) networks with the gateway as DHCP
+// server. The legacy /api/v2/setting/lan/networks POST cannot create
+// interface-purpose networks; it silently strips gatewaySubnet/dhcpSettings.
+//
+// Discovered via browser dev tools on OC200 v6 UI. Key fields:
+//   - DeviceConfig wraps deviceList + tagIds (NOT at top level)
+//   - LanNetwork carries the network parameters (gateway, DHCP, etc.)
+//   - No "purpose" field — the endpoint implicitly creates interface networks
+type InterfaceNetworkCreateRequest struct {
+	DeviceConfig InterfaceDeviceConfig `json:"deviceConfig"`
+	LanNetwork   InterfaceLanNetwork   `json:"lanNetwork"`
+}
+
+// InterfaceDeviceConfig holds device-level settings + the device list with
+// gateway MAC and port selections.
+type InterfaceDeviceConfig struct {
+	PortIsolationEnable bool                   `json:"portIsolationEnable"`
+	FlowControlEnable   bool                   `json:"flowControlEnable"`
+	DeviceList          []InterfaceDeviceEntry `json:"deviceList"`
+	TagIDs              []string               `json:"tagIds"`
+}
+
+// InterfaceDeviceEntry describes the gateway and the ports the new network
+// will be tagged on. `Type` is 1 for gateway devices.
+type InterfaceDeviceEntry struct {
+	Mac   string   `json:"mac"`
+	Type  int      `json:"type"`
+	Ports []string `json:"ports"`
+	Lags  []string `json:"lags"`
+}
+
+// InterfaceLanNetwork carries the L3 network parameters.
+type InterfaceLanNetwork struct {
+	Name                 string                 `json:"name"`
+	DeviceMac            string                 `json:"deviceMac"`
+	DeviceType           int                    `json:"deviceType"`
+	VlanType             int                    `json:"vlanType"`
+	Vlan                 int                    `json:"vlan"`
+	GatewaySubnet        string                 `json:"gatewaySubnet"`
+	DHCPSettings         *InterfaceDHCPSettings `json:"dhcpSettings,omitempty"`
+	UpnpLanEnable        bool                   `json:"upnpLanEnable"`
+	IGMPSnoopEnable      bool                   `json:"igmpSnoopEnable"`
+	DhcpGuard            DhcpGuardSettings      `json:"dhcpGuard"`
+	DhcpV6Guard          DhcpGuardSettings      `json:"dhcpv6Guard"`
+	LanNetworkIPv6Config LanNetworkIPv6Config   `json:"lanNetworkIpv6Config"`
+	QosQueueEnable       bool                   `json:"qosQueueEnable"`
+	Isolation            bool                   `json:"isolation"`
+	MldSnoopEnable       bool                   `json:"mldSnoopEnable"`
+	ArpDetectionEnable   bool                   `json:"arpDetectionEnable"`
+	DhcpL2RelayEnable    bool                   `json:"dhcpL2RelayEnable"`
+}
+
+// InterfaceDHCPSettings is the openapi/v1 DHCP shape — uses ipRangePool
+// (array) instead of ipaddrStart/ipaddrEnd, and adds gatewayMode + options.
+type InterfaceDHCPSettings struct {
+	Enable      bool          `json:"enable"`
+	IPRangePool []DhcpIPRange `json:"ipRangePool"`
+	DhcpNs      string        `json:"dhcpns"`
+	LeaseTime   int           `json:"leasetime"`
+	GatewayMode string        `json:"gatewayMode"`
+	Options     []interface{} `json:"options"`
+}
+
+// LanNetworkIPv6Config — observed always sent as {proto:0, enable:0}
+// (IPv6 disabled) on IPv4-only networks.
+type LanNetworkIPv6Config struct {
+	Proto  int `json:"proto"`
+	Enable int `json:"enable"`
+}
+
+// InterfaceNetworkCreateResult is the response from POST /networks/confirm.
+type InterfaceNetworkCreateResult struct {
+	NetworkIDList []string `json:"networkIdList"`
+}
+
+// CreateInterfaceNetwork creates an L3 (purpose=interface) network via the
+// openapi/v1 endpoint and returns the created Network read back via the
+// legacy /api/v2 list endpoint (openapi/v1 list returns -1600).
+//
+// The openapi/v1 endpoint requires extra request headers:
+//   - Csrf-Token (same as legacy)
+//   - Omada-Request-Source: web-local (REQUIRED — without it, returns -44116)
+//   - X-Requested-With: XMLHttpRequest
+//
+// And does NOT use the ?token= query param.
+func (c *Client) CreateInterfaceNetwork(ctx context.Context, siteID string, req *InterfaceNetworkCreateRequest) (*Network, error) {
+	// Adopt pattern: check for an existing network with the same name.
+	existing, err := c.ListNetworks(ctx, siteID)
+	if err != nil {
+		return nil, fmt.Errorf("listing networks for adopt check: %w", err)
+	}
+	for _, n := range existing {
+		if n.Name == req.LanNetwork.Name {
+			return &n, nil
+		}
+	}
+
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/networks/confirm", c.baseURL, c.omadacID, siteID)
+	resp, err := c.doOpenAPIRequest(ctx, http.MethodPost, url, req)
+	if err != nil {
+		return nil, err
+	}
+
+	var result InterfaceNetworkCreateResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("decoding network create result (raw: %s): %w", string(resp.Result), err)
+	}
+	if len(result.NetworkIDList) == 0 {
+		return nil, fmt.Errorf("network created but no ID in response: %s", string(resp.Result))
+	}
+
+	// Read back via the legacy /api/v2 list to get the full Network object
+	// (openapi/v1 list returns -1600 "Unsupported request path").
+	return c.GetNetwork(ctx, siteID, result.NetworkIDList[0])
+}
+
+// doOpenAPIRequest sends a request to the openapi/v1 surface. Adds the
+// session-bridge headers the v6 UI uses and omits the ?token= query param.
+func (c *Client) doOpenAPIRequest(ctx context.Context, method, url string, body interface{}) (*APIResponse, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		jsonBody, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling request body: %w", err)
+		}
+		bodyReader = bytes.NewReader(jsonBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Csrf-Token", c.token)
+	req.Header.Set("Omada-Request-Source", "web-local")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w", method, url, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+
+	var apiResp APIResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("decoding response (status %d, body: %s): %w", resp.StatusCode, string(respBody), err)
+	}
+	if apiResp.ErrorCode != 0 {
+		return &apiResp, fmt.Errorf("API error %d: %s", apiResp.ErrorCode, apiResp.Msg)
+	}
+	return &apiResp, nil
+}
+
 func (c *Client) CreateNetwork(ctx context.Context, siteID string, network *Network) (*Network, error) {
 	// Check for an existing network with the same name (adopt pattern).
 	existing, err := c.ListNetworks(ctx, siteID)
