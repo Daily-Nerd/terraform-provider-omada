@@ -157,8 +157,105 @@ echo "Probe B (+leasetime120): $OUT_DIR/patch-full-response.json" >&2
 echo "Probe C (+allLan=false): $OUT_DIR/patch-alllan-response.json" >&2
 echo "Probe D (+subnetOverride): $OUT_DIR/patch-subnet-response.json" >&2
 
-# Final state of cameras after the probes
+# Probe E: minimal body — just purpose + gateway + DHCP. Strip all the
+# feature toggles. Bisects whether one of those toggles is what -1
+# objects to.
+PATCH_MIN_INTERFACE=$(jq -nc --arg p2 "$PORT2_ID" '{
+    name:"cameras",
+    purpose:"interface",
+    vlan:60,
+    gatewaySubnet:"10.10.60.1/24",
+    dhcpSettings:{
+        enable:true,
+        ipaddrStart:"10.10.60.100",
+        ipaddrEnd:"10.10.60.250",
+        leasetime:120,
+        dhcpns:"auto"
+    },
+    interfaceIds:[$p2]
+}')
+echo "$PATCH_MIN_INTERFACE" > "$OUT_DIR/patch-min-interface-body.json"
+
+echo "[9/10] Probe E: minimal interface body (no feature toggles)" >&2
+"${CURL[@]}" -X PATCH "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
+    -H 'Content-Type: application/json' \
+    -d "$PATCH_MIN_INTERFACE" \
+    > "$OUT_DIR/patch-min-interface-response.json"
+jq '.' "$OUT_DIR/patch-min-interface-response.json" >&2
+
+# Probe F: just flip purpose, nothing else. See whether ANY interface PATCH
+# is accepted.
+PATCH_PURPOSE_ONLY=$(jq -nc '{
+    name:"cameras",
+    purpose:"interface",
+    vlan:60
+}')
+echo "$PATCH_PURPOSE_ONLY" > "$OUT_DIR/patch-purpose-only-body.json"
+
+echo "[10/10] Probe F: purpose-only flip (no gateway, no DHCP, no interfaces)" >&2
+"${CURL[@]}" -X PATCH "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
+    -H 'Content-Type: application/json' \
+    -d "$PATCH_PURPOSE_ONLY" \
+    > "$OUT_DIR/patch-purpose-only-response.json"
+jq '.' "$OUT_DIR/patch-purpose-only-response.json" >&2
+
+# Probe G: same as B + ipRangePool array. Omada 6.x may require the
+# modern multi-range pool shape instead of (or in addition to) the
+# legacy ipaddrStart/ipaddrEnd pair.
+PATCH_POOL=$(echo "$PATCH_FULL" | jq '
+    .dhcpSettings.ipRangePool = [{ipaddrStart: "10.10.60.100", ipaddrEnd: "10.10.60.250"}]
+')
+echo "$PATCH_POOL" > "$OUT_DIR/patch-pool-body.json"
+
+echo "[11/13] Probe G: + dhcpSettings.ipRangePool array" >&2
+"${CURL[@]}" -X PATCH "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
+    -H 'Content-Type: application/json' \
+    -d "$PATCH_POOL" \
+    > "$OUT_DIR/patch-pool-response.json"
+jq '.' "$OUT_DIR/patch-pool-response.json" >&2
+
+# Probe H: keep ALL 5 current interfaceIds, just flip purpose and add
+# gateway/DHCP. Tests whether the interfaceIds shrink (5 -> 1) is what
+# triggers -1, not the purpose transition itself.
+PATCH_KEEP_PORTS=$(echo "$PATCH_FULL" | jq '
+    .interfaceIds = [
+        "2_2b95b4f331d6443da942b0f6b24ef4c5",
+        "4_72a10839d1864cbf8861d20182b442fe",
+        "5_51320fdf135a4ae9b6fddf7fb692e961",
+        "6_ddd1e5921a5e4181b2cd738014ff0d71",
+        "7_06fa7e6034984023a69499bb2ad63058"
+    ]
+')
+echo "$PATCH_KEEP_PORTS" > "$OUT_DIR/patch-keep-ports-body.json"
+
+echo "[12/13] Probe H: keep all 5 interfaceIds + purpose flip" >&2
+"${CURL[@]}" -X PATCH "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
+    -H 'Content-Type: application/json' \
+    -d "$PATCH_KEEP_PORTS" \
+    > "$OUT_DIR/patch-keep-ports-response.json"
+jq '.' "$OUT_DIR/patch-keep-ports-response.json" >&2
+
+# Probe I: stay in purpose=vlan but shrink interfaceIds 5->1. Tests
+# whether the controller will accept the interfaceIds change at all
+# when purpose isn't flipping.
+PATCH_SHRINK_ONLY=$(jq -nc --arg p2 "$PORT2_ID" '{
+    name:"cameras",
+    purpose:"vlan",
+    vlan:60,
+    interfaceIds:[$p2],
+    igmpSnoopEnable:false
+}')
+echo "$PATCH_SHRINK_ONLY" > "$OUT_DIR/patch-shrink-only-body.json"
+
+echo "[13/13] Probe I: shrink interfaceIds 5->1, keep purpose=vlan" >&2
+"${CURL[@]}" -X PATCH "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
+    -H 'Content-Type: application/json' \
+    -d "$PATCH_SHRINK_ONLY" \
+    > "$OUT_DIR/patch-shrink-only-response.json"
+jq '.' "$OUT_DIR/patch-shrink-only-response.json" >&2
+
+# Final state via list endpoint (individual GET returns -1600).
 echo "" >&2
-echo "[POST] Final state of cameras network:" >&2
-"${CURL[@]}" "$(api "/sites/$SITE_ID/setting/lan/networks/$CAMERAS_ID")" \
-    | jq '{id, name, purpose, vlan, gatewaySubnet, dhcpSettings, interfaceIds, allLan, subnetOverride, subnetOverrideEnable}'
+echo "[POST] cameras current state (via list endpoint):" >&2
+"${CURL[@]}" "$(api "/sites/$SITE_ID/setting/lan/networks?currentPage=1&currentPageSize=100")" \
+    | jq '.result.data[] | select(.id=="'"$CAMERAS_ID"'") | {id, name, purpose, vlan, gatewaySubnet, dhcpSettings, interfaceIds, allLan, subnetOverride, subnetOverrideEnable}'
