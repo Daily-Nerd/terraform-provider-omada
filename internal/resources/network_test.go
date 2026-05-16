@@ -96,8 +96,8 @@ func TestNetwork_BuildFromModel_AllFields(t *testing.T) {
 	if d.LeaseTime != 720 {
 		t.Errorf("LeaseTime = %d, want 720", d.LeaseTime)
 	}
-	if d.DhcpNs != "auto" {
-		t.Errorf("DhcpNs = %q, want auto", d.DhcpNs)
+	if d.Dhcpns != "auto" {
+		t.Errorf("Dhcpns = %q, want auto", d.Dhcpns)
 	}
 
 	if len(got.InterfaceIds) != 2 || got.InterfaceIds[0] != "1_b59d" || got.InterfaceIds[1] != "2_2b95" {
@@ -174,7 +174,7 @@ func TestNetwork_ApplyToModel_InterfacePurposeAllFields(t *testing.T) {
 			IPAddrStart: "10.10.10.100",
 			IPAddrEnd:   "10.10.10.250",
 			LeaseTime:   720,
-			DhcpNs:      "manual",
+			Dhcpns:      "manual",
 		},
 	}
 
@@ -276,8 +276,8 @@ func TestNetwork_BuildFromModel_DhcpDefaultsWhenUnset(t *testing.T) {
 	if got.DHCPSettings.LeaseTime != 120 {
 		t.Errorf("LeaseTime = %d, want 120 (controller default)", got.DHCPSettings.LeaseTime)
 	}
-	if got.DHCPSettings.DhcpNs != "auto" {
-		t.Errorf("DhcpNs = %q, want \"auto\" (controller default)", got.DHCPSettings.DhcpNs)
+	if got.DHCPSettings.Dhcpns != "auto" {
+		t.Errorf("Dhcpns = %q, want \"auto\" (controller default)", got.DHCPSettings.Dhcpns)
 	}
 	if !got.DHCPSettings.Enable {
 		t.Error("DHCPSettings.Enable should be true")
@@ -331,7 +331,7 @@ func TestNetwork_BuildFromModel_DhcpDefaultsRespectExplicitValues(t *testing.T) 
 	if got.DHCPSettings.LeaseTime != 14400 {
 		t.Errorf("LeaseTime = %d, want 14400 (user-supplied, must not be overridden)", got.DHCPSettings.LeaseTime)
 	}
-	if got.DHCPSettings.DhcpNs != "manual" {
-		t.Errorf("DhcpNs = %q, want \"manual\" (user-supplied, must not be overridden)", got.DHCPSettings.DhcpNs)
+	if got.DHCPSettings.Dhcpns != "manual" {
+		t.Errorf("Dhcpns = %q, want \"manual\" (user-supplied, must not be overridden)", got.DHCPSettings.Dhcpns)
 	}
 }

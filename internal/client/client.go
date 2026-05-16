@@ -126,14 +126,19 @@ type DHCPSettings struct {
 	IPAddrStart string `json:"ipaddrStart,omitempty"`
 	IPAddrEnd   string `json:"ipaddrEnd,omitempty"`
 	LeaseTime   int    `json:"leasetime,omitempty"`
-	// DhcpNs is the DNS source: "auto" (use gateway DNS) or "manual"
-	// (use dhcpns1/dhcpns2 fields). Optional — controller defaults to "auto".
-	DhcpNs string `json:"dhcpns,omitempty"`
-	// Dhcpns1 / Dhcpns2 are the per-network DNS servers handed out as DHCP
-	// option 6 when DhcpNs == "manual". Empty strings are stripped via
+	// Dhcpns is the DNS source: "auto" (use gateway DNS) or "manual"
+	// (use PriDns / SecondaryDns fields). Optional — controller defaults
+	// to "auto". The legacy /api/v2 list endpoint returns the same
+	// openapi/v1 wire format here ("dhcpns", "priDns", "secondaryDns").
+	Dhcpns string `json:"dhcpns,omitempty"`
+	// PriDns / SecondaryDns are the per-network DNS servers handed out as
+	// DHCP option 6 when Dhcpns == "manual". Empty strings are stripped via
 	// omitempty so the controller falls back to gateway DNS in "auto" mode.
-	Dhcpns1 string `json:"dhcpns1,omitempty"`
-	Dhcpns2 string `json:"dhcpns2,omitempty"`
+	// Previous field names (Dhcpns1/Dhcpns2 with tags dhcpns1/dhcpns2) were
+	// wrong — the controller's /api/v2 GET emits openapi/v1-style tags, so
+	// the old names silently dropped priDns on Read after Update.
+	PriDns       string `json:"priDns,omitempty"`
+	SecondaryDns string `json:"secondaryDns,omitempty"`
 	// IPRangePool enables multiple IP range pools per DHCP scope. Mutually
 	// exclusive with the single IPAddrStart/IPAddrEnd pair on some
 	// firmware versions; consult controller behavior before mixing.
@@ -1101,9 +1106,9 @@ func convertLegacyDHCPToInterface(legacy *DHCPSettings) *InterfaceDHCPSettings {
 	return &InterfaceDHCPSettings{
 		Enable:       legacy.Enable,
 		IPRangePool:  pool,
-		Dhcpns:       legacy.DhcpNs,
-		PriDns:       legacy.Dhcpns1, // legacy conflates source + servers
-		SecondaryDns: legacy.Dhcpns2,
+		Dhcpns:       legacy.Dhcpns,
+		PriDns:       legacy.PriDns,
+		SecondaryDns: legacy.SecondaryDns,
 		LeaseTime:    legacy.LeaseTime,
 		GatewayMode:  gwMode,
 		Options:      options,
@@ -1170,11 +1175,56 @@ func (c *Client) UpdateInterfaceNetwork(ctx context.Context, siteID, networkID s
 
 	base := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/networks/%s", c.baseURL, c.omadacID, siteID, networkID)
 
+	// Bounded retry around the FULL 4-step sequence. Previously only the
+	// PUT confirm was wrapped, on the assumption that param-check/check/
+	// devices-ports validate fast and never see transient -1. In practice,
+	// under load (e.g. 10 sequential network updates × 4 openapi/v1 POSTs
+	// each), param-check and check have also returned "API error -1:
+	// General error". isTransientMinus1 keeps real validation errors
+	// (like -1001 "must not be null") failing fast on the first attempt.
+	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		err := c.runUpdateSequence(ctx, base, req)
+		if err == nil {
+			lastErr = nil
+			break
+		}
+		if !isTransientMinus1(err) {
+			return nil, err
+		}
+		lastErr = err
+		if attempt == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoffs[attempt]):
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	// Confirm responses on update do not reliably echo the full Network
+	// object (the create variant returns a networkIdList, update may
+	// return an empty result). Re-read via the legacy /api/v2 GET to
+	// produce a consistent Network for state.
+	return c.GetNetwork(ctx, siteID, networkID)
+}
+
+// runUpdateSequence performs the 4-step openapi/v1 update flow:
+// param-check, check, devices/ports, and the confirm PUT. Errors from
+// each step are wrapped with their step name so callers (and the retry
+// loop above) can tell where -1 came from. The actual save only happens
+// on step 4 (PUT confirm); steps 1-3 are validation passes.
+func (c *Client) runUpdateSequence(ctx context.Context, base string, req *InterfaceNetworkCreateRequest) error {
 	// Step 1: param-check. Body is the flat lanNetwork payload (the merged
 	// read-back). This is the validation pass that previously lived at
 	// /check with the wrong body shape.
 	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/param-check", req.LanNetwork); err != nil {
-		return nil, fmt.Errorf("network update param-check failed: %w", err)
+		return fmt.Errorf("network update param-check failed: %w", err)
 	}
 
 	// Step 2: check. Body wraps lanNetwork in the {deviceConfig:{},
@@ -1188,7 +1238,7 @@ func (c *Client) UpdateInterfaceNetwork(ctx context.Context, siteID, networkID s
 		"skipEnable":   true,
 	}
 	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/check", checkBody); err != nil {
-		return nil, fmt.Errorf("network update check failed: %w", err)
+		return fmt.Errorf("network update check failed: %w", err)
 	}
 
 	// Step 3: devices/ports — port-binding validation. Body is the flat
@@ -1218,45 +1268,27 @@ func (c *Client) UpdateInterfaceNetwork(ctx context.Context, siteID, networkID s
 		AssignIPDeviceType: 1,
 	}
 	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/devices/ports", devicesPortsBody); err != nil {
-		return nil, fmt.Errorf("network update devices/ports failed: %w", err)
+		return fmt.Errorf("network update devices/ports failed: %w", err)
 	}
 
-	// Step 4: confirm — the actual save. METHOD IS PUT (not POST). Bounded
-	// retry on transient -1 only; other errors fail fast. Param-check,
-	// check, and devices/ports above validate fast and never see transient
-	// -1 — only the confirm PUT actually writes to the device and is
-	// subject to the gateway-provisioning lane saturation that triggers
-	// errorCode -1.
-	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
-	var resp *APIResponse
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		resp, lastErr = c.doOpenAPIRequest(ctx, http.MethodPut, base+"/confirm", req)
-		if lastErr == nil {
-			break
-		}
-		if resp == nil || resp.ErrorCode != -1 {
-			return nil, lastErr
-		}
-		if attempt == 2 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(backoffs[attempt]):
-		}
+	// Step 4: confirm — the actual save. METHOD IS PUT (not POST).
+	if _, err := c.doOpenAPIRequest(ctx, http.MethodPut, base+"/confirm", req); err != nil {
+		return fmt.Errorf("network update confirm failed: %w", err)
 	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
+	return nil
+}
 
-	// Confirm responses on update do not reliably echo the full Network
-	// object (the create variant returns a networkIdList, update may
-	// return an empty result). Re-read via the legacy /api/v2 GET to
-	// produce a consistent Network for state.
-	_ = resp
-	return c.GetNetwork(ctx, siteID, networkID)
+// isTransientMinus1 reports whether err originated from an Omada API
+// errorCode == -1 ("General error"). The doOpenAPIRequest path formats
+// errors as "API error %d: %s" — we scan for the marker rather than
+// plumb a typed error so we do not have to break the existing signature.
+// Validation failures use distinct codes (-1001 for "must not be null",
+// etc.) and intentionally fail fast without retry.
+func isTransientMinus1(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "API error -1:")
 }
 
 // doOpenAPIRequest sends a request to the openapi/v1 surface. Adds the

@@ -336,13 +336,13 @@ func buildNetworkFromModel(ctx context.Context, m *NetworkResourceModel, diags *
 			dns2 = m.DhcpDnsSecondary.ValueString()
 		}
 		network.DHCPSettings = &client.DHCPSettings{
-			Enable:      enabled,
-			IPAddrStart: m.DHCPStart.ValueString(),
-			IPAddrEnd:   m.DHCPEnd.ValueString(),
-			LeaseTime:   leaseTime,
-			DhcpNs:      dhcpNs,
-			Dhcpns1:     dns1,
-			Dhcpns2:     dns2,
+			Enable:       enabled,
+			IPAddrStart:  m.DHCPStart.ValueString(),
+			IPAddrEnd:    m.DHCPEnd.ValueString(),
+			LeaseTime:    leaseTime,
+			Dhcpns:       dhcpNs,
+			PriDns:       dns1,
+			SecondaryDns: dns2,
 		}
 	}
 	if !m.LanInterfaceIds.IsNull() && !m.LanInterfaceIds.IsUnknown() {
@@ -416,15 +416,17 @@ func applyNetworkToModel(ctx context.Context, m *NetworkResourceModel, n *client
 		m.DHCPStart = types.StringValue(n.DHCPSettings.IPAddrStart)
 		m.DHCPEnd = types.StringValue(n.DHCPSettings.IPAddrEnd)
 		m.DHCPLeaseTime = types.Int64Value(int64(n.DHCPSettings.LeaseTime))
-		if n.DHCPSettings.DhcpNs != "" {
-			m.DHCPDnsSource = types.StringValue(n.DHCPSettings.DhcpNs)
+		if n.DHCPSettings.Dhcpns != "" {
+			m.DHCPDnsSource = types.StringValue(n.DHCPSettings.Dhcpns)
 		} else {
 			m.DHCPDnsSource = types.StringNull()
 		}
 		// Always set as StringValue (empty when unset) — see Default in
-		// schema above for the rationale.
-		m.DhcpDnsPrimary = types.StringValue(n.DHCPSettings.Dhcpns1)
-		m.DhcpDnsSecondary = types.StringValue(n.DHCPSettings.Dhcpns2)
+		// schema above for the rationale. The legacy /api/v2 list endpoint
+		// emits the openapi/v1 wire shape ("priDns" / "secondaryDns"), so
+		// we read straight from the renamed Go fields.
+		m.DhcpDnsPrimary = types.StringValue(n.DHCPSettings.PriDns)
+		m.DhcpDnsSecondary = types.StringValue(n.DHCPSettings.SecondaryDns)
 	} else {
 		m.DHCPEnabled = types.BoolNull()
 		m.DHCPStart = types.StringNull()
