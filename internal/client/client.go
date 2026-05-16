@@ -129,6 +129,11 @@ type DHCPSettings struct {
 	// DhcpNs is the DNS source: "auto" (use gateway DNS) or "manual"
 	// (use dhcpns1/dhcpns2 fields). Optional — controller defaults to "auto".
 	DhcpNs string `json:"dhcpns,omitempty"`
+	// Dhcpns1 / Dhcpns2 are the per-network DNS servers handed out as DHCP
+	// option 6 when DhcpNs == "manual". Empty strings are stripped via
+	// omitempty so the controller falls back to gateway DNS in "auto" mode.
+	Dhcpns1 string `json:"dhcpns1,omitempty"`
+	Dhcpns2 string `json:"dhcpns2,omitempty"`
 	// IPRangePool enables multiple IP range pools per DHCP scope. Mutually
 	// exclusive with the single IPAddrStart/IPAddrEnd pair on some
 	// firmware versions; consult controller behavior before mixing.
@@ -757,6 +762,11 @@ type InterfaceDHCPSettings struct {
 	Enable      bool          `json:"enable"`
 	IPRangePool []DhcpIPRange `json:"ipRangePool"`
 	DhcpNs      string        `json:"dhcpns"`
+	// Dhcpns1 / Dhcpns2 are the per-network DNS servers (DHCP option 6).
+	// Only meaningful when DhcpNs == "manual". omitempty keeps the
+	// controller in "auto" gateway-DNS mode when unset.
+	Dhcpns1     string        `json:"dhcpns1,omitempty"`
+	Dhcpns2     string        `json:"dhcpns2,omitempty"`
 	LeaseTime   int           `json:"leasetime"`
 	GatewayMode string        `json:"gatewayMode"`
 	Options     []interface{} `json:"options"`

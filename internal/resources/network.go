@@ -53,8 +53,10 @@ type NetworkResourceModel struct {
 	ArpDetectionEnable types.Bool  `tfsdk:"arp_detection_enable"`
 
 	// DHCP-scoped extras
-	DHCPLeaseTime types.Int64  `tfsdk:"dhcp_lease_time"`
-	DHCPDnsSource types.String `tfsdk:"dhcp_dns_source"`
+	DHCPLeaseTime    types.Int64  `tfsdk:"dhcp_lease_time"`
+	DHCPDnsSource    types.String `tfsdk:"dhcp_dns_source"`
+	DhcpDnsPrimary   types.String `tfsdk:"dhcp_dns_primary"`
+	DhcpDnsSecondary types.String `tfsdk:"dhcp_dns_secondary"`
 
 	// GatewayMAC is the MAC address of the gateway device (e.g. ER707) that
 	// will host the L3 interface + DHCP for purpose=interface networks. Only
@@ -220,9 +222,21 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed:    true,
 			},
 			"dhcp_dns_source": schema.StringAttribute{
-				Description: "DHCP DNS source: 'auto' (use gateway-provided DNS) or 'manual' (use dhcpns1/dhcpns2 — note these specific fields are not yet surfaced in this schema). Only applicable when DHCP is enabled.",
+				Description: "DHCP DNS source: 'auto' (use gateway-provided DNS) or 'manual' (use dhcp_dns_primary / dhcp_dns_secondary). Only applicable when DHCP is enabled.",
 				Optional:    true,
 				Computed:    true,
+			},
+			"dhcp_dns_primary": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     stringdefault.StaticString(""),
+				Description: "Primary DNS server (DHCP option 6) handed out to clients on this network. Only effective when dhcp_dns_source = \"manual\". Empty string means unset.",
+			},
+			"dhcp_dns_secondary": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     stringdefault.StaticString(""),
+				Description: "Secondary DNS server. Same conditions as dhcp_dns_primary.",
 			},
 			"gateway_mac": schema.StringAttribute{
 				Description: "MAC address of the gateway device (e.g. ER707) that will host the L3 interface + DHCP for this network. REQUIRED when purpose='interface' — the v6 controller's openapi/v1 endpoint needs it to identify which device runs the routed VLAN. Format: dash-separated uppercase hex, e.g. \"AC-A7-F1-12-0C-6B\". Ignored when purpose='vlan'.",
@@ -313,12 +327,22 @@ func buildNetworkFromModel(ctx context.Context, m *NetworkResourceModel, diags *
 				dhcpNs = "auto"
 			}
 		}
+		// Per-network DNS (DHCP option 6) is only meaningful when the source
+		// is "manual"; in "auto" mode the controller falls back to gateway
+		// DNS and we strip the fields via omitempty by sending empty strings.
+		var dns1, dns2 string
+		if dhcpNs == "manual" {
+			dns1 = m.DhcpDnsPrimary.ValueString()
+			dns2 = m.DhcpDnsSecondary.ValueString()
+		}
 		network.DHCPSettings = &client.DHCPSettings{
 			Enable:      enabled,
 			IPAddrStart: m.DHCPStart.ValueString(),
 			IPAddrEnd:   m.DHCPEnd.ValueString(),
 			LeaseTime:   leaseTime,
 			DhcpNs:      dhcpNs,
+			Dhcpns1:     dns1,
+			Dhcpns2:     dns2,
 		}
 	}
 	if !m.LanInterfaceIds.IsNull() && !m.LanInterfaceIds.IsUnknown() {
@@ -377,6 +401,12 @@ func applyNetworkToModel(ctx context.Context, m *NetworkResourceModel, n *client
 		m.DHCPEnd = types.StringNull()
 		m.DHCPLeaseTime = types.Int64Null()
 		m.DHCPDnsSource = types.StringNull()
+		// dhcp_dns_primary / dhcp_dns_secondary have schema Default = "" so
+		// the plan side always materializes them as empty string. Reading
+		// them back as types.StringValue("") (NOT Null) keeps state in
+		// lockstep with the Default and avoids plan-drift on Read.
+		m.DhcpDnsPrimary = types.StringValue("")
+		m.DhcpDnsSecondary = types.StringValue("")
 		return nil
 	}
 
@@ -391,12 +421,18 @@ func applyNetworkToModel(ctx context.Context, m *NetworkResourceModel, n *client
 		} else {
 			m.DHCPDnsSource = types.StringNull()
 		}
+		// Always set as StringValue (empty when unset) — see Default in
+		// schema above for the rationale.
+		m.DhcpDnsPrimary = types.StringValue(n.DHCPSettings.Dhcpns1)
+		m.DhcpDnsSecondary = types.StringValue(n.DHCPSettings.Dhcpns2)
 	} else {
 		m.DHCPEnabled = types.BoolNull()
 		m.DHCPStart = types.StringNull()
 		m.DHCPEnd = types.StringNull()
 		m.DHCPLeaseTime = types.Int64Null()
 		m.DHCPDnsSource = types.StringNull()
+		m.DhcpDnsPrimary = types.StringValue("")
+		m.DhcpDnsSecondary = types.StringValue("")
 	}
 	return nil
 }
@@ -504,6 +540,14 @@ func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *Netw
 		if dhcpNs == "" {
 			dhcpNs = "auto"
 		}
+		// Per-network DNS (DHCP option 6) only forwarded when source is
+		// "manual"; otherwise omitempty strips them and the controller
+		// keeps falling back to gateway DNS.
+		var dns1, dns2 string
+		if dhcpNs == "manual" {
+			dns1 = plan.DhcpDnsPrimary.ValueString()
+			dns2 = plan.DhcpDnsSecondary.ValueString()
+		}
 		dhcp = &client.InterfaceDHCPSettings{
 			Enable: true,
 			IPRangePool: []client.DhcpIPRange{{
@@ -511,6 +555,8 @@ func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *Netw
 				IPAddrEnd:   plan.DHCPEnd.ValueString(),
 			}},
 			DhcpNs:      dhcpNs,
+			Dhcpns1:     dns1,
+			Dhcpns2:     dns2,
 			LeaseTime:   leaseTime,
 			GatewayMode: "auto",
 			Options:     []interface{}{},
