@@ -2,6 +2,20 @@
 
 > **Fork point.** This changelog continues from `emanuelbesliu/terraform-provider-tplink-omada` v2.1.1. The Daily-Nerd fork resets versioning to `0.x.y` to signal a different lineage. Upstream history is preserved below for reference.
 
+## [0.3.0](https://github.com/Daily-Nerd/terraform-provider-omada/compare/v0.2.0...v0.3.0) (2026-05-16)
+
+
+### Features
+
+* **network:** force-provision gateway after openapi/v1 interface create ([#50](https://github.com/Daily-Nerd/terraform-provider-omada/issues/50)) ([e2872eb](https://github.com/Daily-Nerd/terraform-provider-omada/commit/e2872eb68697296414ec5f7491621056a57216c8))
+* **network:** surface dhcpns1/dhcpns2 as dhcp_dns_primary/secondary ([#52](https://github.com/Daily-Nerd/terraform-provider-omada/issues/52)) ([4b913be](https://github.com/Daily-Nerd/terraform-provider-omada/commit/4b913beef45ef9e068fdc602c40bfbc27670071a))
+
+
+### Bug Fixes
+
+* **client:** serialize openapi/v1 network creates + retry on -1 ([#49](https://github.com/Daily-Nerd/terraform-provider-omada/issues/49)) ([7e027c1](https://github.com/Daily-Nerd/terraform-provider-omada/commit/7e027c1d9d2b530f02f77ef64dde81181f6e2ec7))
+* **port_profile:** route Update through openapi/v2 to unblock -33854 ([#53](https://github.com/Daily-Nerd/terraform-provider-omada/issues/53)) ([3d6b779](https://github.com/Daily-Nerd/terraform-provider-omada/commit/3d6b77930506ae2443c922557f025d838fc4b0a5))
+
 ## [0.2.0](https://github.com/Daily-Nerd/terraform-provider-omada/compare/v0.1.0...v0.2.0) (2026-05-15)
 
 
