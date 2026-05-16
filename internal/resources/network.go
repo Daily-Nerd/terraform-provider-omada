@@ -657,9 +657,10 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	// Branch by purpose. purpose has RequiresReplace, so state.Purpose ==
 	// plan.Purpose here; reading state is safe. Interface networks go
-	// through the openapi/v1 3-step check/ports-check/confirm flow — the
-	// legacy /api/v2 PATCH endpoint categorically rejects mutations on
-	// interface-purpose networks with "API error -1: General error".
+	// through the openapi/v1 4-step param-check / check / devices/ports /
+	// PUT confirm flow — the legacy /api/v2 PATCH endpoint categorically
+	// rejects mutations on interface-purpose networks with "API error -1:
+	// General error".
 	var updated *client.Network
 	var err error
 	if state.Purpose.ValueString() == "interface" {

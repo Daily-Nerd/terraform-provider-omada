@@ -777,8 +777,8 @@ type InterfaceDeviceEntry struct {
 //
 // IMPORTANT for the update path: the OC200 v6 UI populates ID, Application,
 // FastLeaveEnable, ExistMultiVlan, TotalIpNum, DhcpServerNum, and the
-// integer IPRangeStart/IPRangeEnd inside dhcpSettings in every /check,
-// /ports-check, and /confirm body. Omitting any of them makes the
+// integer IPRangeStart/IPRangeEnd inside dhcpSettings in every /param-check,
+// /check, and /confirm body. Omitting any of them makes the
 // controller respond with "API error -1001: must not be null" (no field
 // name). UpdateInterfaceNetwork uses a read-merge strategy
 // (mergeInterfaceLanNetwork): fetch the current Network via
@@ -1113,24 +1113,36 @@ func convertLegacyDHCPToInterface(legacy *DHCPSettings) *InterfaceDHCPSettings {
 }
 
 // UpdateInterfaceNetwork updates an existing L3 (purpose=interface) network
-// via the openapi/v1 3-step flow the OC200 v6 UI uses:
+// via the openapi/v1 4-step flow the OC200 v6 UI uses. The wire format was
+// captured byte-for-byte from the live OC200 UI and saved at
+// dist/probe-openapi-v1-update-uicapture/ for future reference:
 //
-//  1. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/check
-//     — param validation; body is the lanNetwork payload.
-//  2. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/ports-check
-//     — device/port validation; body is the deviceConfig payload.
-//  3. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/confirm
-//     — the actual save; body is the {deviceConfig, lanNetwork} envelope.
+//  1. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/param-check
+//     — flat lanNetwork body (the merged read-back payload).
+//  2. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/check
+//     — wrapped body: {deviceConfig:{}, lanNetwork, skipEnable:true}.
+//     Note deviceConfig is empty here; the actual deviceConfig only
+//     ships on confirm.
+//  3. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/devices/ports
+//     — flat body: {macs:[...], vlanType, vlan, assignIpDeviceType:1}.
+//     Replaces the previous (incorrect) /ports-check call.
+//  4. PUT  /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/confirm
+//     — METHOD IS PUT, not POST. Body is the {deviceConfig, lanNetwork}
+//     envelope — the actual save.
+//
+// The previous 3-step implementation sent a naked lanNetwork body to /check
+// and got "API error -1001: must not be null" because the controller expects
+// the wrapped {deviceConfig, lanNetwork, skipEnable} envelope on /check.
 //
 // The legacy /api/v2/setting/lan/networks/{id} PATCH endpoint categorically
 // rejects mutations on interface-purpose networks with "API error -1:
-// General error" — discovered by diffing the OC200 UI capture against the
-// provider's prior behavior. Use this method for purpose=interface
-// networks; legacy UpdateNetwork is fine for purpose=vlan.
+// General error". Use this method for purpose=interface networks; legacy
+// UpdateNetwork is fine for purpose=vlan.
 //
 // Same headers + ?token= omission as CreateInterfaceNetwork.
-// Confirm is wrapped in the same bounded -1 retry as Create; check and
-// ports-check fail fast because empirically they do not see transient -1.
+// Confirm is wrapped in the same bounded -1 retry as Create; param-check,
+// check, and devices/ports validate fast and fail fast because empirically
+// they do not see transient -1 (no device write happens until confirm).
 func (c *Client) UpdateInterfaceNetwork(ctx context.Context, siteID, networkID string, req *InterfaceNetworkCreateRequest) (*Network, error) {
 	if err := c.ensureAuth(ctx); err != nil {
 		return nil, err
@@ -1158,23 +1170,68 @@ func (c *Client) UpdateInterfaceNetwork(ctx context.Context, siteID, networkID s
 
 	base := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/networks/%s", c.baseURL, c.omadacID, siteID, networkID)
 
-	// Step 1: paramcheck. Body is the LAN network portion only.
-	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/check", req.LanNetwork); err != nil {
+	// Step 1: param-check. Body is the flat lanNetwork payload (the merged
+	// read-back). This is the validation pass that previously lived at
+	// /check with the wrong body shape.
+	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/param-check", req.LanNetwork); err != nil {
+		return nil, fmt.Errorf("network update param-check failed: %w", err)
+	}
+
+	// Step 2: check. Body wraps lanNetwork in the {deviceConfig:{},
+	// lanNetwork, skipEnable:true} envelope per the UI capture. The empty
+	// deviceConfig here is intentional — the populated deviceConfig only
+	// ships on confirm. map[string]interface{} keeps the empty object
+	// explicit (struct{}{} marshals to "{}").
+	checkBody := map[string]interface{}{
+		"deviceConfig": struct{}{},
+		"lanNetwork":   req.LanNetwork,
+		"skipEnable":   true,
+	}
+	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/check", checkBody); err != nil {
 		return nil, fmt.Errorf("network update check failed: %w", err)
 	}
 
-	// Step 2: ports-check. Body is the device-config portion only.
-	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/ports-check", req.DeviceConfig); err != nil {
-		return nil, fmt.Errorf("network update ports-check failed: %w", err)
+	// Step 3: devices/ports — port-binding validation. Body is the flat
+	// {macs, vlanType, vlan, assignIpDeviceType} shape.
+	//
+	// The UI capture sent macs=[switchMac, gatewayMac]. We currently only
+	// have the gateway MAC available cheaply (req.DeviceConfig.DeviceList
+	// carries it). Switch MAC discovery would require an extra round trip
+	// to enumerate site devices and filter by interface binding — defer
+	// that until we observe the controller actually rejecting the
+	// single-MAC form. If the controller returns -1001 here we'll iterate.
+	macs := make([]string, 0, len(req.DeviceConfig.DeviceList))
+	for _, dev := range req.DeviceConfig.DeviceList {
+		if dev.Mac != "" {
+			macs = append(macs, dev.Mac)
+		}
+	}
+	devicesPortsBody := struct {
+		Macs               []string `json:"macs"`
+		VlanType           int      `json:"vlanType"`
+		Vlan               int      `json:"vlan"`
+		AssignIPDeviceType int      `json:"assignIpDeviceType"`
+	}{
+		Macs:               macs,
+		VlanType:           req.LanNetwork.VlanType,
+		Vlan:               req.LanNetwork.Vlan,
+		AssignIPDeviceType: 1,
+	}
+	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/devices/ports", devicesPortsBody); err != nil {
+		return nil, fmt.Errorf("network update devices/ports failed: %w", err)
 	}
 
-	// Step 3: confirm — the actual save. Bounded retry on transient -1
-	// only; other errors fail fast.
+	// Step 4: confirm — the actual save. METHOD IS PUT (not POST). Bounded
+	// retry on transient -1 only; other errors fail fast. Param-check,
+	// check, and devices/ports above validate fast and never see transient
+	// -1 — only the confirm PUT actually writes to the device and is
+	// subject to the gateway-provisioning lane saturation that triggers
+	// errorCode -1.
 	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
 	var resp *APIResponse
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		resp, lastErr = c.doOpenAPIRequest(ctx, http.MethodPost, base+"/confirm", req)
+		resp, lastErr = c.doOpenAPIRequest(ctx, http.MethodPut, base+"/confirm", req)
 		if lastErr == nil {
 			break
 		}
@@ -1289,7 +1346,8 @@ func (c *Client) CreateNetwork(ctx context.Context, siteID string, network *Netw
 // IMPORTANT: this endpoint works for purpose=vlan networks only. For
 // purpose=interface networks the controller categorically rejects PATCH
 // here with "API error -1: General error" — those go through
-// UpdateInterfaceNetwork (openapi/v1 3-step check/ports-check/confirm).
+// UpdateInterfaceNetwork (openapi/v1 4-step param-check / check /
+// devices/ports / PUT confirm flow).
 //
 // Serialization rationale: kept on createMu as a cheap safety net. Legacy
 // PATCH is low-volume (vlan-only) and has not been observed to hit the
