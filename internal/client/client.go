@@ -955,6 +955,21 @@ func (c *Client) DeleteNetwork(ctx context.Context, siteID, networkID string) er
 	return err
 }
 
+// ForceProvisionDevice tells the controller to push the latest stored
+// configuration to a specific device (gateway / switch / AP). Required
+// after creating a purpose=interface network via openapi/v1, because the
+// controller stores the new VLAN in its DB but does NOT automatically
+// push the device-side config — the ER707 stays "half-provisioned"
+// until either someone clicks Force Provision in the OC200 UI or this
+// endpoint is called from code.
+//
+// Endpoint: POST /api/v2/sites/{siteId}/cmd/devices/{deviceMac}/forceProvision
+// Body: none.
+func (c *Client) ForceProvisionDevice(ctx context.Context, siteID, deviceMac string) error {
+	_, err := c.doSiteRequest(ctx, siteID, http.MethodPost, fmt.Sprintf("/cmd/devices/%s/forceProvision", deviceMac), nil)
+	return err
+}
+
 // --- Wireless Networks (SSIDs) ---
 
 // ListWlanGroups returns all WLAN groups.

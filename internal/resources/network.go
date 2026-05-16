@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
@@ -61,6 +62,12 @@ type NetworkResourceModel struct {
 	// to identify which device runs the routed VLAN. Format: dash-separated
 	// uppercase hex, e.g. "AC-A7-F1-12-0C-6B".
 	GatewayMAC types.String `tfsdk:"gateway_mac"`
+
+	// ForceProvision controls whether Create() asks the controller to push
+	// the new config to the gateway device immediately after creating a
+	// purpose=interface network. Defaults to true; has no effect for
+	// purpose=vlan networks or on Update/Delete flows.
+	ForceProvision types.Bool `tfsdk:"force_provision"`
 }
 
 func NewNetworkResource() resource.Resource {
@@ -220,6 +227,15 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"gateway_mac": schema.StringAttribute{
 				Description: "MAC address of the gateway device (e.g. ER707) that will host the L3 interface + DHCP for this network. REQUIRED when purpose='interface' — the v6 controller's openapi/v1 endpoint needs it to identify which device runs the routed VLAN. Format: dash-separated uppercase hex, e.g. \"AC-A7-F1-12-0C-6B\". Ignored when purpose='vlan'.",
 				Optional:    true,
+			},
+			"force_provision": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(true),
+				Description: "When the network is created with purpose=interface, ask the controller to push the new config to the gateway device immediately after creation. Without this, the controller stores the network in its DB but the gateway does not pick it up until manually force-provisioned via the OC200 UI. Defaults to true. Has no effect for purpose=vlan networks.",
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -404,6 +420,23 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 		created, err = r.createInterfaceNetwork(ctx, &plan, resp)
 		if err != nil {
 			return // diagnostics already added by helper
+		}
+
+		// Force-provision follow-up: the openapi/v1 confirm endpoint persists
+		// the new interface in the controller DB but does NOT push the
+		// device-side config — the gateway stays "half-provisioned" until
+		// someone clicks Force Provision in the OC200 UI. Best-effort: failure
+		// is surfaced as a warning, not an error, because the network itself
+		// was created successfully.
+		forceProvision := plan.ForceProvision.IsNull() || plan.ForceProvision.IsUnknown() || plan.ForceProvision.ValueBool()
+		gwMac := plan.GatewayMAC.ValueString()
+		if forceProvision && gwMac != "" {
+			if perr := r.client.ForceProvisionDevice(ctx, siteID, gwMac); perr != nil {
+				resp.Diagnostics.AddWarning(
+					"Force provision failed",
+					fmt.Sprintf("Network %q was created successfully, but the post-create force-provision call to device %s failed: %s. The gateway may not pick up the new VLAN until you click Force Provision in the OC200 UI.", plan.Name.ValueString(), gwMac, perr.Error()),
+				)
+			}
 		}
 	} else {
 		var buildErrs []error
