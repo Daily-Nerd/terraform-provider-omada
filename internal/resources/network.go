@@ -53,8 +53,10 @@ type NetworkResourceModel struct {
 	ArpDetectionEnable types.Bool  `tfsdk:"arp_detection_enable"`
 
 	// DHCP-scoped extras
-	DHCPLeaseTime types.Int64  `tfsdk:"dhcp_lease_time"`
-	DHCPDnsSource types.String `tfsdk:"dhcp_dns_source"`
+	DHCPLeaseTime    types.Int64  `tfsdk:"dhcp_lease_time"`
+	DHCPDnsSource    types.String `tfsdk:"dhcp_dns_source"`
+	DhcpDnsPrimary   types.String `tfsdk:"dhcp_dns_primary"`
+	DhcpDnsSecondary types.String `tfsdk:"dhcp_dns_secondary"`
 
 	// GatewayMAC is the MAC address of the gateway device (e.g. ER707) that
 	// will host the L3 interface + DHCP for purpose=interface networks. Only
@@ -220,9 +222,21 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed:    true,
 			},
 			"dhcp_dns_source": schema.StringAttribute{
-				Description: "DHCP DNS source: 'auto' (use gateway-provided DNS) or 'manual' (use dhcpns1/dhcpns2 — note these specific fields are not yet surfaced in this schema). Only applicable when DHCP is enabled.",
+				Description: "DHCP DNS source: 'auto' (use gateway-provided DNS) or 'manual' (use dhcp_dns_primary / dhcp_dns_secondary). Only applicable when DHCP is enabled.",
 				Optional:    true,
 				Computed:    true,
+			},
+			"dhcp_dns_primary": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     stringdefault.StaticString(""),
+				Description: "Primary DNS server (DHCP option 6) handed out to clients on this network. Only effective when dhcp_dns_source = \"manual\". Empty string means unset.",
+			},
+			"dhcp_dns_secondary": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     stringdefault.StaticString(""),
+				Description: "Secondary DNS server. Same conditions as dhcp_dns_primary.",
 			},
 			"gateway_mac": schema.StringAttribute{
 				Description: "MAC address of the gateway device (e.g. ER707) that will host the L3 interface + DHCP for this network. REQUIRED when purpose='interface' — the v6 controller's openapi/v1 endpoint needs it to identify which device runs the routed VLAN. Format: dash-separated uppercase hex, e.g. \"AC-A7-F1-12-0C-6B\". Ignored when purpose='vlan'.",
@@ -313,12 +327,22 @@ func buildNetworkFromModel(ctx context.Context, m *NetworkResourceModel, diags *
 				dhcpNs = "auto"
 			}
 		}
+		// Per-network DNS (DHCP option 6) is only meaningful when the source
+		// is "manual"; in "auto" mode the controller falls back to gateway
+		// DNS and we strip the fields via omitempty by sending empty strings.
+		var dns1, dns2 string
+		if dhcpNs == "manual" {
+			dns1 = m.DhcpDnsPrimary.ValueString()
+			dns2 = m.DhcpDnsSecondary.ValueString()
+		}
 		network.DHCPSettings = &client.DHCPSettings{
-			Enable:      enabled,
-			IPAddrStart: m.DHCPStart.ValueString(),
-			IPAddrEnd:   m.DHCPEnd.ValueString(),
-			LeaseTime:   leaseTime,
-			DhcpNs:      dhcpNs,
+			Enable:       enabled,
+			IPAddrStart:  m.DHCPStart.ValueString(),
+			IPAddrEnd:    m.DHCPEnd.ValueString(),
+			LeaseTime:    leaseTime,
+			Dhcpns:       dhcpNs,
+			PriDns:       dns1,
+			SecondaryDns: dns2,
 		}
 	}
 	if !m.LanInterfaceIds.IsNull() && !m.LanInterfaceIds.IsUnknown() {
@@ -377,6 +401,12 @@ func applyNetworkToModel(ctx context.Context, m *NetworkResourceModel, n *client
 		m.DHCPEnd = types.StringNull()
 		m.DHCPLeaseTime = types.Int64Null()
 		m.DHCPDnsSource = types.StringNull()
+		// dhcp_dns_primary / dhcp_dns_secondary have schema Default = "" so
+		// the plan side always materializes them as empty string. Reading
+		// them back as types.StringValue("") (NOT Null) keeps state in
+		// lockstep with the Default and avoids plan-drift on Read.
+		m.DhcpDnsPrimary = types.StringValue("")
+		m.DhcpDnsSecondary = types.StringValue("")
 		return nil
 	}
 
@@ -386,17 +416,25 @@ func applyNetworkToModel(ctx context.Context, m *NetworkResourceModel, n *client
 		m.DHCPStart = types.StringValue(n.DHCPSettings.IPAddrStart)
 		m.DHCPEnd = types.StringValue(n.DHCPSettings.IPAddrEnd)
 		m.DHCPLeaseTime = types.Int64Value(int64(n.DHCPSettings.LeaseTime))
-		if n.DHCPSettings.DhcpNs != "" {
-			m.DHCPDnsSource = types.StringValue(n.DHCPSettings.DhcpNs)
+		if n.DHCPSettings.Dhcpns != "" {
+			m.DHCPDnsSource = types.StringValue(n.DHCPSettings.Dhcpns)
 		} else {
 			m.DHCPDnsSource = types.StringNull()
 		}
+		// Always set as StringValue (empty when unset) — see Default in
+		// schema above for the rationale. The legacy /api/v2 list endpoint
+		// emits the openapi/v1 wire shape ("priDns" / "secondaryDns"), so
+		// we read straight from the renamed Go fields.
+		m.DhcpDnsPrimary = types.StringValue(n.DHCPSettings.PriDns)
+		m.DhcpDnsSecondary = types.StringValue(n.DHCPSettings.SecondaryDns)
 	} else {
 		m.DHCPEnabled = types.BoolNull()
 		m.DHCPStart = types.StringNull()
 		m.DHCPEnd = types.StringNull()
 		m.DHCPLeaseTime = types.Int64Null()
 		m.DHCPDnsSource = types.StringNull()
+		m.DhcpDnsPrimary = types.StringValue("")
+		m.DhcpDnsSecondary = types.StringValue("")
 	}
 	return nil
 }
@@ -463,16 +501,14 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// createInterfaceNetwork builds the openapi/v1 confirm body and creates an
-// L3 (purpose=interface) network. Returns the Network read back from the
-// legacy /api/v2 list. Requires plan.GatewayMAC to be set.
-func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *NetworkResourceModel, resp *resource.CreateResponse) (*client.Network, error) {
+// buildInterfaceNetworkRequest builds the openapi/v1 body shared by Create
+// (POST /networks/confirm) and Update (POST /networks/{id}/confirm). Returns
+// (request, nil) on success, (nil, errors) on validation failure — caller
+// is responsible for surfacing the errors to its diagnostics sink.
+func buildInterfaceNetworkRequest(ctx context.Context, plan *NetworkResourceModel) (*client.InterfaceNetworkCreateRequest, []error) {
+	var errs []error
 	if plan.GatewayMAC.IsNull() || plan.GatewayMAC.IsUnknown() || plan.GatewayMAC.ValueString() == "" {
-		err := fmt.Errorf("gateway_mac is required when purpose=\"interface\"")
-		resp.Diagnostics.AddError("Missing gateway_mac",
-			"purpose=\"interface\" networks are created via the v6 openapi/v1 endpoint, which requires the gateway's MAC address. "+
-				"Set gateway_mac to the ER707 (or other gateway) MAC, e.g. \"AC-A7-F1-12-0C-6B\".")
-		return nil, err
+		errs = append(errs, fmt.Errorf("gateway_mac is required when purpose=\"interface\""))
 	}
 
 	var ports []string
@@ -480,17 +516,16 @@ func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *Netw
 		d := plan.LanInterfaceIds.ElementsAs(ctx, &ports, false)
 		if d.HasError() {
 			for _, e := range d.Errors() {
-				resp.Diagnostics.AddError("Decoding lan_interface_ids", fmt.Sprintf("%s: %s", e.Summary(), e.Detail()))
+				errs = append(errs, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
 			}
-			return nil, fmt.Errorf("decoding lan_interface_ids")
 		}
 	}
 	if len(ports) == 0 {
-		err := fmt.Errorf("lan_interface_ids must contain at least one gateway LAN port")
-		resp.Diagnostics.AddError("Missing lan_interface_ids",
-			"purpose=\"interface\" networks require at least one gateway LAN port UUID in lan_interface_ids. "+
-				"Use data.omada_gateway_ports to discover valid IDs.")
-		return nil, err
+		errs = append(errs, fmt.Errorf("lan_interface_ids must contain at least one gateway LAN port"))
+	}
+
+	if len(errs) > 0 {
+		return nil, errs
 	}
 
 	dhcpEnabled := !plan.DHCPEnabled.IsNull() && plan.DHCPEnabled.ValueBool()
@@ -504,16 +539,26 @@ func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *Netw
 		if dhcpNs == "" {
 			dhcpNs = "auto"
 		}
+		// Per-network DNS (DHCP option 6) only forwarded when source is
+		// "manual"; otherwise omitempty strips them and the controller
+		// keeps falling back to gateway DNS.
+		var dns1, dns2 string
+		if dhcpNs == "manual" {
+			dns1 = plan.DhcpDnsPrimary.ValueString()
+			dns2 = plan.DhcpDnsSecondary.ValueString()
+		}
 		dhcp = &client.InterfaceDHCPSettings{
 			Enable: true,
 			IPRangePool: []client.DhcpIPRange{{
 				IPAddrStart: plan.DHCPStart.ValueString(),
 				IPAddrEnd:   plan.DHCPEnd.ValueString(),
 			}},
-			DhcpNs:      dhcpNs,
-			LeaseTime:   leaseTime,
-			GatewayMode: "auto",
-			Options:     []interface{}{},
+			Dhcpns:       dhcpNs,
+			PriDns:       dns1,
+			SecondaryDns: dns2,
+			LeaseTime:    leaseTime,
+			GatewayMode:  "auto",
+			Options:      []interface{}{},
 		}
 	}
 
@@ -549,6 +594,20 @@ func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *Netw
 			ArpDetectionEnable:   plan.ArpDetectionEnable.ValueBool(),
 			DhcpL2RelayEnable:    plan.DhcpL2RelayEnable.ValueBool(),
 		},
+	}
+	return body, nil
+}
+
+// createInterfaceNetwork builds the openapi/v1 confirm body and creates an
+// L3 (purpose=interface) network. Returns the Network read back from the
+// legacy /api/v2 list. Requires plan.GatewayMAC to be set.
+func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *NetworkResourceModel, resp *resource.CreateResponse) (*client.Network, error) {
+	body, errs := buildInterfaceNetworkRequest(ctx, plan)
+	if len(errs) > 0 {
+		for _, e := range errs {
+			resp.Diagnostics.AddError("Building interface network request", e.Error())
+		}
+		return nil, errs[0]
 	}
 
 	created, err := r.client.CreateInterfaceNetwork(ctx, plan.SiteID.ValueString(), body)
@@ -596,21 +655,59 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	siteID := state.SiteID.ValueString()
+	networkID := state.ID.ValueString()
 
-	var buildErrs []error
-	network := buildNetworkFromModel(ctx, &plan, &buildErrs)
-	if len(buildErrs) > 0 {
-		for _, e := range buildErrs {
-			resp.Diagnostics.AddError("Building network payload", e.Error())
+	// Branch by purpose. purpose has RequiresReplace, so state.Purpose ==
+	// plan.Purpose here; reading state is safe. Interface networks go
+	// through the openapi/v1 4-step param-check / check / devices/ports /
+	// PUT confirm flow — the legacy /api/v2 PATCH endpoint categorically
+	// rejects mutations on interface-purpose networks with "API error -1:
+	// General error".
+	var updated *client.Network
+	var err error
+	if state.Purpose.ValueString() == "interface" {
+		body, errs := buildInterfaceNetworkRequest(ctx, &plan)
+		if len(errs) > 0 {
+			for _, e := range errs {
+				resp.Diagnostics.AddError("Building interface network payload", e.Error())
+			}
+			return
 		}
-		return
-	}
-	network.ID = state.ID.ValueString()
+		updated, err = r.client.UpdateInterfaceNetwork(ctx, siteID, networkID, body)
+		if err != nil {
+			resp.Diagnostics.AddError("Error updating interface network", err.Error())
+			return
+		}
 
-	updated, err := r.client.UpdateNetwork(ctx, siteID, state.ID.ValueString(), network)
-	if err != nil {
-		resp.Diagnostics.AddError("Error updating network", err.Error())
-		return
+		// Mirror Create: force-provision so the gateway picks up the new
+		// config without manual UI intervention. Best-effort; surface as
+		// a warning on failure since the update itself succeeded.
+		forceProvision := plan.ForceProvision.IsNull() || plan.ForceProvision.IsUnknown() || plan.ForceProvision.ValueBool()
+		gwMac := plan.GatewayMAC.ValueString()
+		if forceProvision && gwMac != "" {
+			if perr := r.client.ForceProvisionDevice(ctx, siteID, gwMac); perr != nil {
+				resp.Diagnostics.AddWarning(
+					"Force provision failed",
+					fmt.Sprintf("Network %q was updated successfully, but the post-update force-provision call to device %s failed: %s. The gateway may not pick up the change until you click Force Provision in the OC200 UI.", plan.Name.ValueString(), gwMac, perr.Error()),
+				)
+			}
+		}
+	} else {
+		var buildErrs []error
+		network := buildNetworkFromModel(ctx, &plan, &buildErrs)
+		if len(buildErrs) > 0 {
+			for _, e := range buildErrs {
+				resp.Diagnostics.AddError("Building network payload", e.Error())
+			}
+			return
+		}
+		network.ID = networkID
+
+		updated, err = r.client.UpdateNetwork(ctx, siteID, networkID, network)
+		if err != nil {
+			resp.Diagnostics.AddError("Error updating network", err.Error())
+			return
+		}
 	}
 
 	plan.ID = state.ID
