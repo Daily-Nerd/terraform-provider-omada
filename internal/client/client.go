@@ -758,18 +758,33 @@ type InterfaceLanNetwork struct {
 
 // InterfaceDHCPSettings is the openapi/v1 DHCP shape — uses ipRangePool
 // (array) instead of ipaddrStart/ipaddrEnd, and adds gatewayMode + options.
+//
+// IMPORTANT: openapi/v1 uses different JSON tags than the legacy /api/v2
+// DHCPSettings struct. Per the OC200 UI capture for /networks/{id}/check
+// and /networks/{id}/confirm, the wire format is:
+//
+//   - "dhcpns"       — source flag: "auto" | "manual" (was dhcpns1/dhcpns2
+//     in legacy, conflated; openapi/v1 keeps the source distinct)
+//   - "priDns"       — primary DNS handed out to clients
+//   - "secondaryDns" — secondary DNS
+//
+// Sending the legacy dhcpns1/dhcpns2 tags here makes the controller silently
+// treat the request as "DNS source unchanged" and ignore the overrides.
 type InterfaceDHCPSettings struct {
 	Enable      bool          `json:"enable"`
 	IPRangePool []DhcpIPRange `json:"ipRangePool"`
-	DhcpNs      string        `json:"dhcpns"`
-	// Dhcpns1 / Dhcpns2 are the per-network DNS servers (DHCP option 6).
-	// Only meaningful when DhcpNs == "manual". omitempty keeps the
+	// Dhcpns is the DNS source flag: "auto" (inherit gateway DNS) or
+	// "manual" (use PriDns / SecondaryDns). Without this field, the
+	// controller treats DNS-override fields as "unchanged".
+	Dhcpns string `json:"dhcpns,omitempty"`
+	// PriDns / SecondaryDns are the per-network DNS servers (DHCP option 6).
+	// Only meaningful when Dhcpns == "manual". omitempty keeps the
 	// controller in "auto" gateway-DNS mode when unset.
-	Dhcpns1     string        `json:"dhcpns1,omitempty"`
-	Dhcpns2     string        `json:"dhcpns2,omitempty"`
-	LeaseTime   int           `json:"leasetime"`
-	GatewayMode string        `json:"gatewayMode"`
-	Options     []interface{} `json:"options"`
+	PriDns       string        `json:"priDns,omitempty"`
+	SecondaryDns string        `json:"secondaryDns,omitempty"`
+	LeaseTime    int           `json:"leasetime"`
+	GatewayMode  string        `json:"gatewayMode"`
+	Options      []interface{} `json:"options"`
 }
 
 // LanNetworkIPv6Config — observed always sent as {proto:0, enable:0}
@@ -862,6 +877,82 @@ func (c *Client) CreateInterfaceNetwork(ctx context.Context, siteID string, req 
 	return c.GetNetwork(ctx, siteID, result.NetworkIDList[0])
 }
 
+// UpdateInterfaceNetwork updates an existing L3 (purpose=interface) network
+// via the openapi/v1 3-step flow the OC200 v6 UI uses:
+//
+//  1. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/check
+//     — param validation; body is the lanNetwork payload.
+//  2. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/ports-check
+//     — device/port validation; body is the deviceConfig payload.
+//  3. POST /openapi/v1/{omadacId}/sites/{siteId}/networks/{id}/confirm
+//     — the actual save; body is the {deviceConfig, lanNetwork} envelope.
+//
+// The legacy /api/v2/setting/lan/networks/{id} PATCH endpoint categorically
+// rejects mutations on interface-purpose networks with "API error -1:
+// General error" — discovered by diffing the OC200 UI capture against the
+// provider's prior behavior. Use this method for purpose=interface
+// networks; legacy UpdateNetwork is fine for purpose=vlan.
+//
+// Same headers + ?token= omission as CreateInterfaceNetwork.
+// Confirm is wrapped in the same bounded -1 retry as Create; check and
+// ports-check fail fast because empirically they do not see transient -1.
+func (c *Client) UpdateInterfaceNetwork(ctx context.Context, siteID, networkID string, req *InterfaceNetworkCreateRequest) (*Network, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+
+	// Serialize the openapi/v1 mutation path. Same rationale as
+	// CreateInterfaceNetwork — the controller's gateway provisioning lane
+	// is not safe for concurrent writes; overflow returns errorCode -1.
+	c.createMu.Lock()
+	defer c.createMu.Unlock()
+
+	base := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/networks/%s", c.baseURL, c.omadacID, siteID, networkID)
+
+	// Step 1: paramcheck. Body is the LAN network portion only.
+	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/check", req.LanNetwork); err != nil {
+		return nil, fmt.Errorf("network update check failed: %w", err)
+	}
+
+	// Step 2: ports-check. Body is the device-config portion only.
+	if _, err := c.doOpenAPIRequest(ctx, http.MethodPost, base+"/ports-check", req.DeviceConfig); err != nil {
+		return nil, fmt.Errorf("network update ports-check failed: %w", err)
+	}
+
+	// Step 3: confirm — the actual save. Bounded retry on transient -1
+	// only; other errors fail fast.
+	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+	var resp *APIResponse
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, lastErr = c.doOpenAPIRequest(ctx, http.MethodPost, base+"/confirm", req)
+		if lastErr == nil {
+			break
+		}
+		if resp == nil || resp.ErrorCode != -1 {
+			return nil, lastErr
+		}
+		if attempt == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoffs[attempt]):
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	// Confirm responses on update do not reliably echo the full Network
+	// object (the create variant returns a networkIdList, update may
+	// return an empty result). Re-read via the legacy /api/v2 GET to
+	// produce a consistent Network for state.
+	_ = resp
+	return c.GetNetwork(ctx, siteID, networkID)
+}
+
 // doOpenAPIRequest sends a request to the openapi/v1 surface. Adds the
 // session-bridge headers the v6 UI uses and omits the ?token= query param.
 func (c *Client) doOpenAPIRequest(ctx context.Context, method, url string, body interface{}) (*APIResponse, error) {
@@ -943,8 +1034,23 @@ func (c *Client) CreateNetwork(ctx context.Context, siteID string, network *Netw
 	return nil, fmt.Errorf("network created but no ID in response: %s", string(resp.Result))
 }
 
-// UpdateNetwork updates an existing LAN network.
+// UpdateNetwork updates an existing LAN network via the legacy
+// /api/v2/setting/lan/networks/{id} PATCH endpoint.
+//
+// IMPORTANT: this endpoint works for purpose=vlan networks only. For
+// purpose=interface networks the controller categorically rejects PATCH
+// here with "API error -1: General error" — those go through
+// UpdateInterfaceNetwork (openapi/v1 3-step check/ports-check/confirm).
+//
+// Serialization rationale: kept on createMu as a cheap safety net. Legacy
+// PATCH is low-volume (vlan-only) and has not been observed to hit the
+// throughput-cap issue that motivated serializing CreateInterfaceNetwork,
+// but a single extra lock acquisition per vlan update is negligible and
+// removes a footgun for any future caller batching many vlan updates.
 func (c *Client) UpdateNetwork(ctx context.Context, siteID, networkID string, network *Network) (*Network, error) {
+	c.createMu.Lock()
+	defer c.createMu.Unlock()
+
 	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPatch, fmt.Sprintf("/setting/lan/networks/%s", networkID), network)
 	if err != nil {
 		return nil, err
@@ -959,8 +1065,19 @@ func (c *Client) UpdateNetwork(ctx context.Context, siteID, networkID string, ne
 	return &updated, nil
 }
 
-// DeleteNetwork deletes a LAN network.
+// DeleteNetwork deletes a LAN network via /api/v2.
+//
+// Serialized via createMu as a cheap safety net (same rationale as the
+// updated UpdateNetwork doc above).
+//
+// TODO: confirm whether interface-purpose networks need the openapi/v1
+// delete endpoint (POST /openapi/v1/.../networks/{id}/delete or similar).
+// Capture the UI's delete request before changing — guessing here would
+// produce the same -1 errors the Update path hit when we assumed /api/v2.
 func (c *Client) DeleteNetwork(ctx context.Context, siteID, networkID string) error {
+	c.createMu.Lock()
+	defer c.createMu.Unlock()
+
 	_, err := c.doSiteRequest(ctx, siteID, http.MethodDelete, fmt.Sprintf("/setting/lan/networks/%s", networkID), nil)
 	return err
 }

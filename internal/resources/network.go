@@ -499,16 +499,14 @@ func (r *NetworkResource) Create(ctx context.Context, req resource.CreateRequest
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// createInterfaceNetwork builds the openapi/v1 confirm body and creates an
-// L3 (purpose=interface) network. Returns the Network read back from the
-// legacy /api/v2 list. Requires plan.GatewayMAC to be set.
-func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *NetworkResourceModel, resp *resource.CreateResponse) (*client.Network, error) {
+// buildInterfaceNetworkRequest builds the openapi/v1 body shared by Create
+// (POST /networks/confirm) and Update (POST /networks/{id}/confirm). Returns
+// (request, nil) on success, (nil, errors) on validation failure — caller
+// is responsible for surfacing the errors to its diagnostics sink.
+func buildInterfaceNetworkRequest(ctx context.Context, plan *NetworkResourceModel) (*client.InterfaceNetworkCreateRequest, []error) {
+	var errs []error
 	if plan.GatewayMAC.IsNull() || plan.GatewayMAC.IsUnknown() || plan.GatewayMAC.ValueString() == "" {
-		err := fmt.Errorf("gateway_mac is required when purpose=\"interface\"")
-		resp.Diagnostics.AddError("Missing gateway_mac",
-			"purpose=\"interface\" networks are created via the v6 openapi/v1 endpoint, which requires the gateway's MAC address. "+
-				"Set gateway_mac to the ER707 (or other gateway) MAC, e.g. \"AC-A7-F1-12-0C-6B\".")
-		return nil, err
+		errs = append(errs, fmt.Errorf("gateway_mac is required when purpose=\"interface\""))
 	}
 
 	var ports []string
@@ -516,17 +514,16 @@ func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *Netw
 		d := plan.LanInterfaceIds.ElementsAs(ctx, &ports, false)
 		if d.HasError() {
 			for _, e := range d.Errors() {
-				resp.Diagnostics.AddError("Decoding lan_interface_ids", fmt.Sprintf("%s: %s", e.Summary(), e.Detail()))
+				errs = append(errs, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
 			}
-			return nil, fmt.Errorf("decoding lan_interface_ids")
 		}
 	}
 	if len(ports) == 0 {
-		err := fmt.Errorf("lan_interface_ids must contain at least one gateway LAN port")
-		resp.Diagnostics.AddError("Missing lan_interface_ids",
-			"purpose=\"interface\" networks require at least one gateway LAN port UUID in lan_interface_ids. "+
-				"Use data.omada_gateway_ports to discover valid IDs.")
-		return nil, err
+		errs = append(errs, fmt.Errorf("lan_interface_ids must contain at least one gateway LAN port"))
+	}
+
+	if len(errs) > 0 {
+		return nil, errs
 	}
 
 	dhcpEnabled := !plan.DHCPEnabled.IsNull() && plan.DHCPEnabled.ValueBool()
@@ -554,12 +551,12 @@ func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *Netw
 				IPAddrStart: plan.DHCPStart.ValueString(),
 				IPAddrEnd:   plan.DHCPEnd.ValueString(),
 			}},
-			DhcpNs:      dhcpNs,
-			Dhcpns1:     dns1,
-			Dhcpns2:     dns2,
-			LeaseTime:   leaseTime,
-			GatewayMode: "auto",
-			Options:     []interface{}{},
+			Dhcpns:       dhcpNs,
+			PriDns:       dns1,
+			SecondaryDns: dns2,
+			LeaseTime:    leaseTime,
+			GatewayMode:  "auto",
+			Options:      []interface{}{},
 		}
 	}
 
@@ -595,6 +592,20 @@ func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *Netw
 			ArpDetectionEnable:   plan.ArpDetectionEnable.ValueBool(),
 			DhcpL2RelayEnable:    plan.DhcpL2RelayEnable.ValueBool(),
 		},
+	}
+	return body, nil
+}
+
+// createInterfaceNetwork builds the openapi/v1 confirm body and creates an
+// L3 (purpose=interface) network. Returns the Network read back from the
+// legacy /api/v2 list. Requires plan.GatewayMAC to be set.
+func (r *NetworkResource) createInterfaceNetwork(ctx context.Context, plan *NetworkResourceModel, resp *resource.CreateResponse) (*client.Network, error) {
+	body, errs := buildInterfaceNetworkRequest(ctx, plan)
+	if len(errs) > 0 {
+		for _, e := range errs {
+			resp.Diagnostics.AddError("Building interface network request", e.Error())
+		}
+		return nil, errs[0]
 	}
 
 	created, err := r.client.CreateInterfaceNetwork(ctx, plan.SiteID.ValueString(), body)
@@ -642,21 +653,58 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	siteID := state.SiteID.ValueString()
+	networkID := state.ID.ValueString()
 
-	var buildErrs []error
-	network := buildNetworkFromModel(ctx, &plan, &buildErrs)
-	if len(buildErrs) > 0 {
-		for _, e := range buildErrs {
-			resp.Diagnostics.AddError("Building network payload", e.Error())
+	// Branch by purpose. purpose has RequiresReplace, so state.Purpose ==
+	// plan.Purpose here; reading state is safe. Interface networks go
+	// through the openapi/v1 3-step check/ports-check/confirm flow — the
+	// legacy /api/v2 PATCH endpoint categorically rejects mutations on
+	// interface-purpose networks with "API error -1: General error".
+	var updated *client.Network
+	var err error
+	if state.Purpose.ValueString() == "interface" {
+		body, errs := buildInterfaceNetworkRequest(ctx, &plan)
+		if len(errs) > 0 {
+			for _, e := range errs {
+				resp.Diagnostics.AddError("Building interface network payload", e.Error())
+			}
+			return
 		}
-		return
-	}
-	network.ID = state.ID.ValueString()
+		updated, err = r.client.UpdateInterfaceNetwork(ctx, siteID, networkID, body)
+		if err != nil {
+			resp.Diagnostics.AddError("Error updating interface network", err.Error())
+			return
+		}
 
-	updated, err := r.client.UpdateNetwork(ctx, siteID, state.ID.ValueString(), network)
-	if err != nil {
-		resp.Diagnostics.AddError("Error updating network", err.Error())
-		return
+		// Mirror Create: force-provision so the gateway picks up the new
+		// config without manual UI intervention. Best-effort; surface as
+		// a warning on failure since the update itself succeeded.
+		forceProvision := plan.ForceProvision.IsNull() || plan.ForceProvision.IsUnknown() || plan.ForceProvision.ValueBool()
+		gwMac := plan.GatewayMAC.ValueString()
+		if forceProvision && gwMac != "" {
+			if perr := r.client.ForceProvisionDevice(ctx, siteID, gwMac); perr != nil {
+				resp.Diagnostics.AddWarning(
+					"Force provision failed",
+					fmt.Sprintf("Network %q was updated successfully, but the post-update force-provision call to device %s failed: %s. The gateway may not pick up the change until you click Force Provision in the OC200 UI.", plan.Name.ValueString(), gwMac, perr.Error()),
+				)
+			}
+		}
+	} else {
+		var buildErrs []error
+		network := buildNetworkFromModel(ctx, &plan, &buildErrs)
+		if len(buildErrs) > 0 {
+			for _, e := range buildErrs {
+				resp.Diagnostics.AddError("Building network payload", e.Error())
+			}
+			return
+		}
+		network.ID = networkID
+
+		updated, err = r.client.UpdateNetwork(ctx, siteID, networkID, network)
+		if err != nil {
+			resp.Diagnostics.AddError("Error updating network", err.Error())
+			return
+		}
 	}
 
 	plan.ID = state.ID
