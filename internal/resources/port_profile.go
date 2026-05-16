@@ -625,8 +625,28 @@ func (r *PortProfileResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
-	_, err := r.client.UpdatePortProfile(ctx, siteID, state.ID.ValueString(), profile)
+	// Route through the openapi/v2 endpoint. The legacy /api/v2
+	// PATCH path returns errorCode -33854 ("The VLAN configuration
+	// for this profile has been disabled in the new UI") on v6
+	// controllers once the profile is marked as managed by the new
+	// UI. UpdatePortProfileV2 is the documented unlock — see
+	// internal/client/client.go for the rationale and capture trail.
+	//
+	// We read-merge against the current legacy GET to seed every
+	// field the v6 body requires (including ones the user did not
+	// declare in TF), then overlay the plan values for the attributes
+	// the resource models. This keeps the rest of the controller's
+	// per-profile state intact across a TF apply.
+	profileID := state.ID.ValueString()
+	current, err := r.client.GetPortProfile(ctx, siteID, profileID)
 	if err != nil {
+		resp.Diagnostics.AddError("Error loading current port profile for update", err.Error())
+		return
+	}
+
+	body := portProfileV2FromPlan(current, profile, profileID)
+
+	if _, err := r.client.UpdatePortProfileV2(ctx, siteID, profileID, body); err != nil {
 		resp.Diagnostics.AddError("Error updating port profile", err.Error())
 		return
 	}
@@ -634,6 +654,134 @@ func (r *PortProfileResource) Update(ctx context.Context, req resource.UpdateReq
 	plan.ID = state.ID
 	plan.SiteID = state.SiteID
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// portProfileV2FromPlan builds the openapi/v2 body from the current
+// controller read-back and the plan-derived PortProfile. The read-back
+// supplies safe defaults for v2-only fields; the plan overlays every
+// attribute the resource models so user edits actually land.
+//
+// Lives in this file (not in the client package) because it depends on
+// the resource's plan shape — the client package's portProfileToV2
+// helper handles the pure read-back → v2 translation; we overlay the
+// plan fields on top of it here.
+func portProfileV2FromPlan(current, plan *client.PortProfile, profileID string) *client.PortProfileV2 {
+	// Translate the GET read-back as the baseline (carries v2-only
+	// defaults the legacy API does not surface).
+	body := portProfileToV2Adapter(current, profileID)
+
+	// Overlay every field the resource models so the v6 PATCH carries
+	// the user's intent. UpdatePortProfileV2 will force
+	// VlanConfigEnable = true regardless of what we set here.
+	body.Name = plan.Name
+	body.POE = plan.POE
+	body.Dot1x = plan.Dot1x
+	body.PortIsolationEnable = plan.PortIsolationEnable
+	body.SpanningTreeEnable = plan.SpanningTreeEnable
+	body.LoopbackDetectVlanBasedEnable = plan.LoopbackDetectVlanBasedEnable
+	body.LldpMedEnable = plan.LLDPMedEnable
+	body.FlowControlEnable = plan.FlowControlEnable
+	body.EeeEnable = plan.EeeEnable
+	body.IgmpFastLeaveEnable = plan.IgmpFastLeaveEnable
+	body.MldFastLeaveEnable = plan.MldFastLeaveEnable
+	body.FastLeaveEnable = plan.FastLeaveEnable
+	body.BandWidthCtrlType = plan.BandWidthCtrlType
+	body.NativeNetworkID = plan.NativeNetworkID
+	body.UntagNetworkIDs = append([]string{}, plan.UntagNetworkIDs...)
+	body.TagNetworkIDs = append([]string{}, plan.TagNetworkIDs...)
+	body.TopoNotifyEnable = plan.TopoNotifyEnable
+	body.LoopbackDetectEnable = plan.LoopbackDetectEnable
+
+	if plan.DhcpL2RelaySettings != nil {
+		body.DhcpL2RelaySettings = client.DhcpGuardSettings{Enable: plan.DhcpL2RelaySettings.Enable}
+	}
+	if plan.SpanningTreeSetting != nil {
+		s := plan.SpanningTreeSetting
+		body.SpanningTreeSetting = client.PortProfileSpanningTreeV2{
+			Priority:       s.Priority,
+			ExtPathCost:    s.ExtPathCost,
+			IntPathCost:    s.IntPathCost,
+			EdgePort:       s.EdgePort,
+			P2pLink:        s.P2pLink,
+			LoopProtect:    s.LoopProtect,
+			RootProtect:    s.RootProtect,
+			TcGuard:        s.TcGuard,
+			BpduProtect:    s.BpduProtect,
+			BpduFilter:     s.BpduFilter,
+			BpduForward:    s.BpduForward,
+			InstanceEnable: body.SpanningTreeSetting.InstanceEnable,
+		}
+	}
+
+	return body
+}
+
+// portProfileToV2Adapter translates a legacy PortProfile read-back
+// (the shape /api/v2 GET returns) into a PortProfileV2 baseline.
+// Fields the legacy GET does not expose (supportESEnable,
+// voiceDscpEnable, instanceEnable, instances, networkTagsSetting,
+// esEnableTaggedNetworkIds, prohibitModify, flag) take safe defaults
+// sourced from the UI capture at
+// dist/probe-openapi-v2-port-profile/00-patch.body.json.
+// networkTagsSetting defaults to 2 (the value the UI sent for a
+// trunk-all profile); if a future capture shows the controller is
+// picky here we can read it from a v2 GET instead. The caller
+// (portProfileV2FromPlan) overlays the plan-controlled fields on top.
+func portProfileToV2Adapter(p *client.PortProfile, profileID string) *client.PortProfileV2 {
+	v2 := &client.PortProfileV2{
+		ID:                            profileID,
+		Name:                          p.Name,
+		POE:                           p.POE,
+		Dot1x:                         p.Dot1x,
+		PortIsolationEnable:           p.PortIsolationEnable,
+		SpanningTreeEnable:            p.SpanningTreeEnable,
+		LoopbackDetectVlanBasedEnable: p.LoopbackDetectVlanBasedEnable,
+		LldpMedEnable:                 p.LLDPMedEnable,
+		FlowControlEnable:             p.FlowControlEnable,
+		EeeEnable:                     p.EeeEnable,
+		IgmpFastLeaveEnable:           p.IgmpFastLeaveEnable,
+		MldFastLeaveEnable:            p.MldFastLeaveEnable,
+		FastLeaveEnable:               p.FastLeaveEnable,
+		SupportESEnable:               false,
+		BandWidthCtrlType:             p.BandWidthCtrlType,
+		VlanConfigEnable:              true,
+		NativeNetworkID:               p.NativeNetworkID,
+		UntagNetworkIDs:               append([]string{}, p.UntagNetworkIDs...),
+		TagNetworkIDs:                 append([]string{}, p.TagNetworkIDs...),
+		ESEnableTaggedNetworkIDs:      []string{},
+		NetworkTagsSetting:            2,
+		VoiceNetworkEnable:            false,
+		VoiceDscpEnable:               false,
+		InstanceEnable:                false,
+		Instances:                     []interface{}{},
+		Flag:                          0,
+		ProhibitModify:                false,
+		TopoNotifyEnable:              p.TopoNotifyEnable,
+		LoopbackDetectEnable:          p.LoopbackDetectEnable,
+		Type:                          p.Type,
+		Resource:                      0,
+	}
+	if p.DhcpL2RelaySettings != nil {
+		v2.DhcpL2RelaySettings = client.DhcpGuardSettings{Enable: p.DhcpL2RelaySettings.Enable}
+	}
+	if p.SpanningTreeSetting != nil {
+		s := p.SpanningTreeSetting
+		v2.SpanningTreeSetting = client.PortProfileSpanningTreeV2{
+			Priority:       s.Priority,
+			ExtPathCost:    s.ExtPathCost,
+			IntPathCost:    s.IntPathCost,
+			EdgePort:       s.EdgePort,
+			P2pLink:        s.P2pLink,
+			LoopProtect:    s.LoopProtect,
+			RootProtect:    s.RootProtect,
+			TcGuard:        s.TcGuard,
+			BpduProtect:    s.BpduProtect,
+			BpduFilter:     s.BpduFilter,
+			BpduForward:    s.BpduForward,
+			InstanceEnable: false,
+		}
+	}
+	return v2
 }
 
 func (r *PortProfileResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
