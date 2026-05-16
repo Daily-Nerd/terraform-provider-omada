@@ -16,6 +16,16 @@ import (
 )
 
 // Client is the Omada Controller API client.
+//
+// Two mutexes are used intentionally:
+//   - mu serializes the auth bootstrap (controller info + login) inside
+//     ensureAuth so concurrent callers don't all log in at once.
+//   - createMu serializes the openapi/v1 network create POST. The controller
+//     serializes gateway-device provisioning server-side and does NOT queue;
+//     when more than ~5 concurrent /networks/confirm requests land it returns
+//     "API error -1: General error" on the overflow. Holding a separate mutex
+//     here (instead of reusing c.mu) avoids a deadlock against ensureAuth,
+//     which is called from inside CreateInterfaceNetwork and also takes c.mu.
 type Client struct {
 	baseURL    string
 	username   string
@@ -24,6 +34,7 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 	mu         sync.Mutex
+	createMu   sync.Mutex
 	readOnly   bool
 }
 
@@ -789,10 +800,43 @@ func (c *Client) CreateInterfaceNetwork(ctx context.Context, siteID string, req 
 		return nil, err
 	}
 
+	// Serialize the openapi/v1 POST itself (not the auth bootstrap).
+	// The controller's gateway-device provisioning path is serialized
+	// server-side and does NOT queue — concurrent /networks/confirm calls
+	// beyond ~5 in flight return errorCode -1 on the overflow. We hold a
+	// dedicated mutex (createMu) so we do not deadlock against ensureAuth,
+	// which takes c.mu above.
+	c.createMu.Lock()
+	defer c.createMu.Unlock()
+
 	url := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/networks/confirm", c.baseURL, c.omadacID, siteID)
-	resp, err := c.doOpenAPIRequest(ctx, http.MethodPost, url, req)
-	if err != nil {
-		return nil, err
+
+	// Bounded retry on transient -1 ("General error") responses only.
+	// The controller occasionally still returns -1 even when this POST is
+	// serialized, because the underlying device-provision step is async on
+	// the controller side. Other errors fail fast.
+	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+	var resp *APIResponse
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, lastErr = c.doOpenAPIRequest(ctx, http.MethodPost, url, req)
+		if lastErr == nil {
+			break
+		}
+		if resp == nil || resp.ErrorCode != -1 {
+			return nil, lastErr
+		}
+		if attempt == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoffs[attempt]):
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
 	}
 
 	var result InterfaceNetworkCreateResult
