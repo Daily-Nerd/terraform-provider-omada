@@ -736,7 +736,21 @@ type InterfaceDeviceEntry struct {
 }
 
 // InterfaceLanNetwork carries the L3 network parameters.
+//
+// IMPORTANT for the update path: the OC200 v6 UI populates ID, Application,
+// FastLeaveEnable, and ExistMultiVlan in every /check, /ports-check, and
+// /confirm body. Omitting any of them makes the controller respond with
+// "API error -1001: must not be null" (no field name). They are always
+// emitted (no omitempty on the booleans / ints; the API wants the explicit
+// false/0, not absence). ID uses omitempty so the create flow — which does
+// not yet have an id — can keep sending the same struct.
+//
+// TODO: switch to a read-then-merge strategy (GetNetwork → overlay plan →
+// submit) so we do not break again when the controller adds new required
+// fields. The current approach hard-codes the defaults the UI uses, which
+// is fragile across controller upgrades.
 type InterfaceLanNetwork struct {
+	ID                   string                 `json:"id,omitempty"`
 	Name                 string                 `json:"name"`
 	DeviceMac            string                 `json:"deviceMac"`
 	DeviceType           int                    `json:"deviceType"`
@@ -754,6 +768,15 @@ type InterfaceLanNetwork struct {
 	MldSnoopEnable       bool                   `json:"mldSnoopEnable"`
 	ArpDetectionEnable   bool                   `json:"arpDetectionEnable"`
 	DhcpL2RelayEnable    bool                   `json:"dhcpL2RelayEnable"`
+	// Application is the network "application" classifier (0 = LAN, per the
+	// OC200 UI capture). Always emitted; the /check endpoint treats the
+	// missing field as null and rejects with -1001.
+	Application int `json:"application"`
+	// FastLeaveEnable mirrors the UI default (false on a standard LAN).
+	FastLeaveEnable bool `json:"fastLeaveEnable"`
+	// ExistMultiVlan mirrors the UI default (false unless the network has
+	// secondary VLANs attached, which the provider does not model yet).
+	ExistMultiVlan bool `json:"existMultiVlan"`
 }
 
 // InterfaceDHCPSettings is the openapi/v1 DHCP shape — uses ipRangePool
@@ -906,6 +929,13 @@ func (c *Client) UpdateInterfaceNetwork(ctx context.Context, siteID, networkID s
 	// is not safe for concurrent writes; overflow returns errorCode -1.
 	c.createMu.Lock()
 	defer c.createMu.Unlock()
+
+	// Inject the network id into the body. The URL alone is not enough —
+	// the /check endpoint validates the body in isolation and returns
+	// "API error -1001: must not be null" when id is absent. The same
+	// body is reused for /confirm, where the controller also expects id
+	// to match the path segment.
+	req.LanNetwork.ID = networkID
 
 	base := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/networks/%s", c.baseURL, c.omadacID, siteID, networkID)
 
