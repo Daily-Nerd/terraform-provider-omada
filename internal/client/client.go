@@ -383,6 +383,78 @@ type DhcpL2RelaySettings struct {
 	Enable bool `json:"enable"`
 }
 
+// PortProfileV2 is the body shape the v6 controller expects on
+// PATCH /openapi/v2/{omadacId}/sites/{siteId}/lan-profiles/{id}.
+//
+// Modelled byte-for-byte from the live UI capture saved at
+// dist/probe-openapi-v2-port-profile/00-patch.body.json. The legacy
+// /api/v2/setting/lan/profiles/{id} PATCH path returns errorCode -33854
+// ("The VLAN configuration for this profile has been disabled in the
+// new UI") once the controller marks a profile as managed by the v6 UI.
+// The openapi/v2 path is the only way to mutate tagNetworkIds /
+// untagNetworkIds / nativeNetworkId on those profiles.
+//
+// IMPORTANT: vlanConfigEnable MUST be true on every PATCH. The -33854
+// error literally means the controller has flipped vlanConfigEnable to
+// false; setting it back to true is the unlock that lets VLAN edits land.
+//
+// Fields without omitempty are intentional — the controller is strict
+// about a complete body. Send the full read-back overlaid with the
+// caller's three TF-controlled fields (tag/untag/native).
+type PortProfileV2 struct {
+	ID                            string                    `json:"id"`
+	Name                          string                    `json:"name"`
+	POE                           int                       `json:"poe"`
+	Dot1x                         int                       `json:"dot1x"`
+	PortIsolationEnable           bool                      `json:"portIsolationEnable"`
+	SpanningTreeEnable            bool                      `json:"spanningTreeEnable"`
+	LoopbackDetectVlanBasedEnable bool                      `json:"loopbackDetectVlanBasedEnable"`
+	LldpMedEnable                 bool                      `json:"lldpMedEnable"`
+	FlowControlEnable             bool                      `json:"flowControlEnable"`
+	EeeEnable                     bool                      `json:"eeeEnable"`
+	IgmpFastLeaveEnable           bool                      `json:"igmpFastLeaveEnable"`
+	MldFastLeaveEnable            bool                      `json:"mldFastLeaveEnable"`
+	FastLeaveEnable               bool                      `json:"fastLeaveEnable"`
+	SupportESEnable               bool                      `json:"supportESEnable"`
+	BandWidthCtrlType             int                       `json:"bandWidthCtrlType"`
+	VlanConfigEnable              bool                      `json:"vlanConfigEnable"` // MUST be true; unlocks -33854
+	NativeNetworkID               string                    `json:"nativeNetworkId"`
+	UntagNetworkIDs               []string                  `json:"untagNetworkIds"`
+	TagNetworkIDs                 []string                  `json:"tagNetworkIds"`
+	ESEnableTaggedNetworkIDs      []string                  `json:"esEnableTaggedNetworkIds"`
+	NetworkTagsSetting            int                       `json:"networkTagsSetting"`
+	VoiceNetworkEnable            bool                      `json:"voiceNetworkEnable"`
+	VoiceDscpEnable               bool                      `json:"voiceDscpEnable"`
+	InstanceEnable                bool                      `json:"instanceEnable"`
+	Instances                     []interface{}             `json:"instances"`
+	Flag                          int                       `json:"flag"`
+	ProhibitModify                bool                      `json:"prohibitModify"`
+	TopoNotifyEnable              bool                      `json:"topoNotifyEnable"`
+	LoopbackDetectEnable          bool                      `json:"loopbackDetectEnable"`
+	Type                          int                       `json:"type"`
+	Resource                      int                       `json:"resource"`
+	DhcpL2RelaySettings           DhcpGuardSettings         `json:"dhcpL2RelaySettings"`
+	SpanningTreeSetting           PortProfileSpanningTreeV2 `json:"spanningTreeSetting"`
+}
+
+// PortProfileSpanningTreeV2 is the openapi/v2 STP block. Differs from the
+// legacy SpanningTreeSetting: the v2 body does NOT include mcheck and
+// adds instanceEnable.
+type PortProfileSpanningTreeV2 struct {
+	Priority       int  `json:"priority"`
+	ExtPathCost    int  `json:"extPathCost"`
+	IntPathCost    int  `json:"intPathCost"`
+	EdgePort       bool `json:"edgePort"`
+	P2pLink        int  `json:"p2pLink"`
+	LoopProtect    bool `json:"loopProtect"`
+	RootProtect    bool `json:"rootProtect"`
+	TcGuard        bool `json:"tcGuard"`
+	BpduProtect    bool `json:"bpduProtect"`
+	BpduFilter     bool `json:"bpduFilter"`
+	BpduForward    bool `json:"bpduForward"`
+	InstanceEnable bool `json:"instanceEnable"`
+}
+
 // NewClient creates a new Omada API client.
 func NewClient(baseURL, username, password string, skipTLSVerify bool) (*Client, error) {
 	jar, err := cookiejar.New(nil)
@@ -1667,7 +1739,15 @@ func (c *Client) CreatePortProfile(ctx context.Context, siteID string, profile *
 	return &created, nil
 }
 
-// UpdatePortProfile updates a port profile.
+// UpdatePortProfile updates a port profile via the legacy
+// /api/v2/setting/lan/profiles/{id} PATCH endpoint.
+//
+// Deprecated: on v6 controllers this endpoint returns errorCode -33854
+// ("The VLAN configuration for this profile has been disabled in the
+// new UI") once the controller marks a profile as managed by the new
+// UI. Resource updates now route through UpdatePortProfileV2, which
+// hits the openapi/v2 lan-profiles path. Retained for any non-Update
+// caller (e.g. CreatePortProfile's adopt path) until each is migrated.
 func (c *Client) UpdatePortProfile(ctx context.Context, siteID, profileID string, profile *PortProfile) (*PortProfile, error) {
 	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPatch, fmt.Sprintf("/setting/lan/profiles/%s", profileID), profile)
 	if err != nil {
@@ -1681,6 +1761,112 @@ func (c *Client) UpdatePortProfile(ctx context.Context, siteID, profileID string
 		return nil, fmt.Errorf("decoding updated port profile: %w", err)
 	}
 	return &updated, nil
+}
+
+// UpdatePortProfileV2 updates a port (LAN) profile via the openapi/v2
+// endpoint that the v6 controller introduced. The legacy
+// /api/v2/setting/lan/profiles/{id} PATCH path returns errorCode -33854
+// ("The VLAN configuration for this profile has been disabled in the
+// new UI") once the controller marks a profile as managed by the new
+// UI (vlanConfigEnable=false); the openapi/v2 path is the only way to
+// mutate tagNetworkIds / untagNetworkIds / nativeNetworkId on those
+// profiles.
+//
+// Endpoint: PATCH /openapi/v2/{omadacId}/sites/{siteId}/lan-profiles/{id}
+// Body: full PortProfileV2 (read-merge against the existing profile,
+// then overlay the three TF-controlled fields). Headers: doOpenAPIRequest
+// already adds csrf + omada-request-source.
+//
+// IMPORTANT: the body MUST include "vlanConfigEnable": true. The error
+// message -33854 says VLAN config has been disabled in the new UI;
+// setting this flag back to true is the unlock that lets VLAN edits land.
+// UpdatePortProfileV2 forces this regardless of what GET reported, so
+// callers do not have to remember to flip it.
+//
+// Serialization: shares createMu with UpdateInterfaceNetwork. Port
+// profile and L3 network mutations are different lanes server-side, but
+// the gateway-config provisioning queue is the same; concurrent writes
+// have been observed to return transient errorCode -1 ("General error")
+// on the same throughput-cap that motivated the network serialization.
+// One mutex for both keeps the cap predictable.
+//
+// Retry: bounded retry on errorCode -1 only (same isTransientMinus1
+// helper as UpdateInterfaceNetwork). Validation failures (e.g. -33854,
+// -1001) intentionally fail fast on the first attempt.
+//
+// Post-PATCH read-back: the controller response is just
+// {"errorCode":0,"msg":"Success."} — no profile echoed back. We re-read
+// via the existing GetPortProfile (legacy /api/v2 GET, which still
+// returns the full profile shape) to give callers a populated struct
+// for state.
+//
+// NOTE: only Update is captured. CreatePortProfile and DeletePortProfile
+// have not been observed returning -33854 and remain on /api/v2. File a
+// follow-up if Create starts failing on v6 controllers — the same
+// openapi/v2 lan-profiles surface likely exposes a POST.
+func (c *Client) UpdatePortProfileV2(ctx context.Context, siteID, profileID string, body *PortProfileV2) (*PortProfile, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+
+	// Serialize against the same gateway-config lane as
+	// UpdateInterfaceNetwork. See doc above for rationale.
+	c.createMu.Lock()
+	defer c.createMu.Unlock()
+
+	// Always force the unlock flag, regardless of caller intent. The
+	// whole reason this method exists is that the controller silently
+	// flips vlanConfigEnable to false; we MUST flip it back on every
+	// PATCH or the controller keeps returning -33854.
+	body.VlanConfigEnable = true
+	// Defend against nil slices marshalling to "null" — the v6 UI
+	// captured these as [] when empty, and the controller is strict.
+	if body.UntagNetworkIDs == nil {
+		body.UntagNetworkIDs = []string{}
+	}
+	if body.TagNetworkIDs == nil {
+		body.TagNetworkIDs = []string{}
+	}
+	if body.ESEnableTaggedNetworkIDs == nil {
+		body.ESEnableTaggedNetworkIDs = []string{}
+	}
+	if body.Instances == nil {
+		body.Instances = []interface{}{}
+	}
+
+	url := fmt.Sprintf("%s/openapi/v2/%s/sites/%s/lan-profiles/%s", c.baseURL, c.omadacID, siteID, profileID)
+
+	// Bounded retry on transient errorCode -1. Mirrors the retry loop
+	// in CreateInterfaceNetwork / UpdateInterfaceNetwork.
+	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err := c.doOpenAPIRequest(ctx, http.MethodPatch, url, body)
+		if err == nil {
+			lastErr = nil
+			break
+		}
+		if !isTransientMinus1(err) {
+			return nil, err
+		}
+		lastErr = err
+		if attempt == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoffs[attempt]):
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	// Response is just {"errorCode":0,"msg":"Success."}. Re-read via
+	// the legacy /api/v2 list-and-filter GET to return a populated
+	// PortProfile for state.
+	return c.GetPortProfile(ctx, siteID, profileID)
 }
 
 // DeletePortProfile deletes a port profile.
