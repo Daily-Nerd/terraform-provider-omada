@@ -138,6 +138,21 @@ type DHCPSettings struct {
 	// exclusive with the single IPAddrStart/IPAddrEnd pair on some
 	// firmware versions; consult controller behavior before mixing.
 	IPRangePool []DhcpIPRange `json:"ipRangePool,omitempty"`
+	// IPRangeStart / IPRangeEnd are the uint32-encoded form the controller
+	// computes and echoes back from /api/v2 GET. Captured for the
+	// read-merge path so /openapi/v1/.../networks/{id}/check sees the
+	// fields it already knows about. omitempty so legacy POST/PATCH
+	// bodies (which never set them) do not start sending zeros and
+	// thereby invalidate the pool.
+	IPRangeStart int64 `json:"ipRangeStart,omitempty"`
+	IPRangeEnd   int64 `json:"ipRangeEnd,omitempty"`
+	// GatewayMode is the DHCP gateway mode the openapi/v1 endpoint expects
+	// in the echoed-back body ("auto" on standard LANs). Captured here so
+	// the read-merge can carry it through; legacy /api/v2 may omit it.
+	GatewayMode string `json:"gatewayMode,omitempty"`
+	// Options is the controller's custom DHCP option array. Captured to
+	// preserve it through the read-merge — provider does not model it yet.
+	Options []interface{} `json:"options,omitempty"`
 }
 
 // DhcpGuardSettings holds DHCP guard toggles (DHCPv4 or DHCPv6).
@@ -187,6 +202,29 @@ type Network struct {
 	AccessControlRule  bool `json:"accessControlRule"`
 	RateLimit          bool `json:"rateLimit"`
 	ArpDetectionEnable bool `json:"arpDetectionEnable"`
+
+	// Gateway binding — surfaced from the /api/v2 GET so the read-merge in
+	// UpdateInterfaceNetwork can echo them back to the openapi/v1 /check
+	// endpoint, which rejects the body with "-1001: must not be null" if
+	// any field it knows about is absent.
+	DeviceMac  string `json:"deviceMac,omitempty"`
+	DeviceType int    `json:"deviceType,omitempty"`
+
+	// Misc per-network toggles populated by /api/v2 GET. Captured for
+	// read-merge fidelity; provider does not model them as inputs yet.
+	UpnpLanEnable  bool `json:"upnpLanEnable"`
+	QosQueueEnable bool `json:"qosQueueEnable"`
+	ExistMultiVlan bool `json:"existMultiVlan"`
+
+	// LanNetworkIPv6Config is the IPv6 settings block. Pointer so we can
+	// distinguish controller-supplied (present) from absent.
+	LanNetworkIPv6Config *LanNetworkIPv6Config `json:"lanNetworkIpv6Config,omitempty"`
+
+	// Computed read-back fields the openapi/v1 /check endpoint expects
+	// echoed back verbatim. The controller derives them from the network's
+	// IP plan; sending zeros — or omitting them — triggers -1001.
+	TotalIpNum    int `json:"totalIpNum,omitempty"`
+	DhcpServerNum int `json:"dhcpServerNum,omitempty"`
 }
 
 // WlanGroup represents a wireless LAN group.
@@ -738,17 +776,16 @@ type InterfaceDeviceEntry struct {
 // InterfaceLanNetwork carries the L3 network parameters.
 //
 // IMPORTANT for the update path: the OC200 v6 UI populates ID, Application,
-// FastLeaveEnable, and ExistMultiVlan in every /check, /ports-check, and
-// /confirm body. Omitting any of them makes the controller respond with
-// "API error -1001: must not be null" (no field name). They are always
-// emitted (no omitempty on the booleans / ints; the API wants the explicit
-// false/0, not absence). ID uses omitempty so the create flow — which does
-// not yet have an id — can keep sending the same struct.
-//
-// TODO: switch to a read-then-merge strategy (GetNetwork → overlay plan →
-// submit) so we do not break again when the controller adds new required
-// fields. The current approach hard-codes the defaults the UI uses, which
-// is fragile across controller upgrades.
+// FastLeaveEnable, ExistMultiVlan, TotalIpNum, DhcpServerNum, and the
+// integer IPRangeStart/IPRangeEnd inside dhcpSettings in every /check,
+// /ports-check, and /confirm body. Omitting any of them makes the
+// controller respond with "API error -1001: must not be null" (no field
+// name). UpdateInterfaceNetwork uses a read-merge strategy
+// (mergeInterfaceLanNetwork): fetch the current Network via
+// /api/v2 GET, overlay the user-controllable fields from the plan,
+// and submit. Read-back fields ride through unchanged so the
+// controller always sees what it sent us. Hard-coding defaults proved
+// fragile across controller versions.
 type InterfaceLanNetwork struct {
 	ID                   string                 `json:"id,omitempty"`
 	Name                 string                 `json:"name"`
@@ -777,6 +814,13 @@ type InterfaceLanNetwork struct {
 	// ExistMultiVlan mirrors the UI default (false unless the network has
 	// secondary VLANs attached, which the provider does not model yet).
 	ExistMultiVlan bool `json:"existMultiVlan"`
+	// TotalIpNum / DhcpServerNum are controller-computed read-back fields
+	// the /check endpoint expects to see echoed in the update body. Carried
+	// through via the read-merge in UpdateInterfaceNetwork. omitempty on
+	// CREATE because the controller derives them; on UPDATE we must echo
+	// whatever the controller currently reports.
+	TotalIpNum    int `json:"totalIpNum,omitempty"`
+	DhcpServerNum int `json:"dhcpServerNum,omitempty"`
 }
 
 // InterfaceDHCPSettings is the openapi/v1 DHCP shape — uses ipRangePool
@@ -808,6 +852,14 @@ type InterfaceDHCPSettings struct {
 	LeaseTime    int           `json:"leasetime"`
 	GatewayMode  string        `json:"gatewayMode"`
 	Options      []interface{} `json:"options"`
+	// IPRangeStart / IPRangeEnd are the uint32 IP encodings the controller
+	// computes from IPRangePool and echoes back on /api/v2 GET (e.g.
+	// "ipRangeStart": 168440320 → 10.10.60.0). The openapi/v1 /check
+	// endpoint on UPDATE expects them present in the body — omitting them
+	// triggers "-1001: must not be null". omitempty so CREATE bodies
+	// (which do not have them yet) keep working.
+	IPRangeStart int64 `json:"ipRangeStart,omitempty"`
+	IPRangeEnd   int64 `json:"ipRangeEnd,omitempty"`
 }
 
 // LanNetworkIPv6Config — observed always sent as {proto:0, enable:0}
@@ -900,6 +952,166 @@ func (c *Client) CreateInterfaceNetwork(ctx context.Context, siteID string, req 
 	return c.GetNetwork(ctx, siteID, result.NetworkIDList[0])
 }
 
+// mergeInterfaceLanNetwork builds the openapi/v1 lanNetwork body by
+// overlaying the user-controllable fields from `plan` onto the controller's
+// current view of the network (`current`). Read-back / computed fields
+// (Application, FastLeaveEnable, ExistMultiVlan, TotalIpNum, DhcpServerNum,
+// plus the integer IPRangeStart/IPRangeEnd inside dhcpSettings) ride
+// through from `current` so the /check endpoint sees exactly what it
+// already knows about. The plan's DHCPSettings — when present — wins
+// outright because the provider treats DHCP as a single user-controlled
+// block (range pool + lease + DNS source). When the plan does NOT carry
+// a DHCPSettings (e.g. dhcp_enabled=false), the current settings are
+// translated to the openapi/v1 shape and reused.
+//
+// Important: this is the ONLY place that decides which fields are
+// "user-controlled" vs "controller-managed". Adding a new user-facing
+// attribute to the network resource means overlaying it here too.
+func mergeInterfaceLanNetwork(current *Network, plan *InterfaceLanNetwork, networkID string) InterfaceLanNetwork {
+	merged := InterfaceLanNetwork{
+		// id is REQUIRED in the body for /check and /confirm — URL alone
+		// is not enough.
+		ID: networkID,
+
+		// User-controlled overlays from the plan.
+		Name:                 plan.Name,
+		DeviceMac:            plan.DeviceMac,
+		DeviceType:           plan.DeviceType,
+		VlanType:             plan.VlanType,
+		Vlan:                 plan.Vlan,
+		GatewaySubnet:        plan.GatewaySubnet,
+		IGMPSnoopEnable:      plan.IGMPSnoopEnable,
+		DhcpGuard:            plan.DhcpGuard,
+		DhcpV6Guard:          plan.DhcpV6Guard,
+		LanNetworkIPv6Config: plan.LanNetworkIPv6Config,
+		Isolation:            plan.Isolation,
+		MldSnoopEnable:       plan.MldSnoopEnable,
+		ArpDetectionEnable:   plan.ArpDetectionEnable,
+		DhcpL2RelayEnable:    plan.DhcpL2RelayEnable,
+		UpnpLanEnable:        plan.UpnpLanEnable,
+		QosQueueEnable:       plan.QosQueueEnable,
+	}
+
+	// Read-back fields — copy as-is from current; the controller expects
+	// them echoed back unchanged.
+	if current != nil {
+		merged.Application = current.Application
+		merged.FastLeaveEnable = current.FastLeaveEnable
+		merged.ExistMultiVlan = current.ExistMultiVlan
+		merged.TotalIpNum = current.TotalIpNum
+		merged.DhcpServerNum = current.DhcpServerNum
+
+		// If the plan omitted gateway binding fields (older code paths
+		// may not set them), fall back to the controller's values so
+		// /check does not see empty deviceMac / deviceType.
+		if merged.DeviceMac == "" {
+			merged.DeviceMac = current.DeviceMac
+		}
+		if merged.DeviceType == 0 {
+			merged.DeviceType = current.DeviceType
+		}
+	}
+
+	// DHCP block: plan wins when provided; otherwise translate current's
+	// legacy /api/v2 shape to the openapi/v1 shape and reuse it. Either
+	// way, we want IPRangeStart/IPRangeEnd echoed back from current so the
+	// /check endpoint sees its own values.
+	switch {
+	case plan.DHCPSettings != nil:
+		merged.DHCPSettings = mergeInterfaceDHCPSettings(current, plan.DHCPSettings)
+	case current != nil && current.DHCPSettings != nil:
+		merged.DHCPSettings = convertLegacyDHCPToInterface(current.DHCPSettings)
+	}
+
+	return merged
+}
+
+// mergeInterfaceDHCPSettings overlays the plan's DHCP block (which the
+// provider populates from user input — range pool, lease time, DNS source,
+// DNS servers) and re-attaches the controller's read-back IP range
+// encodings from `current` so the /check endpoint does not flag them as
+// missing. The plan owns Enable / Pool / Lease / DNS; current contributes
+// IPRangeStart / IPRangeEnd. GatewayMode + Options are taken from current
+// when not set by the plan (provider does not model them yet).
+func mergeInterfaceDHCPSettings(current *Network, plan *InterfaceDHCPSettings) *InterfaceDHCPSettings {
+	merged := *plan // shallow copy — slices share backing array, fine here
+
+	if current == nil || current.DHCPSettings == nil {
+		return &merged
+	}
+	cd := current.DHCPSettings
+
+	// Echo back the controller-computed integer encodings. The /check
+	// endpoint sees these fields in its own GET response, so it expects
+	// them in our update body too.
+	if merged.IPRangeStart == 0 {
+		merged.IPRangeStart = cd.IPRangeStart
+	}
+	if merged.IPRangeEnd == 0 {
+		merged.IPRangeEnd = cd.IPRangeEnd
+	}
+	if merged.GatewayMode == "" {
+		if cd.GatewayMode != "" {
+			merged.GatewayMode = cd.GatewayMode
+		} else {
+			// Captured UI bodies always send "auto" for standard LANs;
+			// fall back to that when the legacy GET did not surface it.
+			merged.GatewayMode = "auto"
+		}
+	}
+	if merged.Options == nil {
+		if cd.Options != nil {
+			merged.Options = cd.Options
+		} else {
+			merged.Options = []interface{}{}
+		}
+	}
+	return &merged
+}
+
+// convertLegacyDHCPToInterface maps the /api/v2 DHCPSettings shape to the
+// openapi/v1 InterfaceDHCPSettings shape. Used by mergeInterfaceLanNetwork
+// when the plan does not carry a DHCP block but the current network has
+// one (e.g. terraform omitted dhcp_* but the network already has DHCP
+// configured — we still need to echo the current state to /check).
+func convertLegacyDHCPToInterface(legacy *DHCPSettings) *InterfaceDHCPSettings {
+	if legacy == nil {
+		return nil
+	}
+
+	pool := legacy.IPRangePool
+	if len(pool) == 0 && legacy.IPAddrStart != "" && legacy.IPAddrEnd != "" {
+		// Legacy may surface only the flat ipaddrStart/ipaddrEnd pair;
+		// openapi/v1 expects the pool array.
+		pool = []DhcpIPRange{{
+			IPAddrStart: legacy.IPAddrStart,
+			IPAddrEnd:   legacy.IPAddrEnd,
+		}}
+	}
+
+	gwMode := legacy.GatewayMode
+	if gwMode == "" {
+		gwMode = "auto"
+	}
+	options := legacy.Options
+	if options == nil {
+		options = []interface{}{}
+	}
+
+	return &InterfaceDHCPSettings{
+		Enable:       legacy.Enable,
+		IPRangePool:  pool,
+		Dhcpns:       legacy.DhcpNs,
+		PriDns:       legacy.Dhcpns1, // legacy conflates source + servers
+		SecondaryDns: legacy.Dhcpns2,
+		LeaseTime:    legacy.LeaseTime,
+		GatewayMode:  gwMode,
+		Options:      options,
+		IPRangeStart: legacy.IPRangeStart,
+		IPRangeEnd:   legacy.IPRangeEnd,
+	}
+}
+
 // UpdateInterfaceNetwork updates an existing L3 (purpose=interface) network
 // via the openapi/v1 3-step flow the OC200 v6 UI uses:
 //
@@ -930,12 +1142,19 @@ func (c *Client) UpdateInterfaceNetwork(ctx context.Context, siteID, networkID s
 	c.createMu.Lock()
 	defer c.createMu.Unlock()
 
-	// Inject the network id into the body. The URL alone is not enough —
-	// the /check endpoint validates the body in isolation and returns
-	// "API error -1001: must not be null" when id is absent. The same
-	// body is reused for /confirm, where the controller also expects id
-	// to match the path segment.
-	req.LanNetwork.ID = networkID
+	// Read-merge: the openapi/v1 /check endpoint demands every field the
+	// controller knows about — including computed read-back fields like
+	// totalIpNum, dhcpServerNum, application, fastLeaveEnable,
+	// existMultiVlan, and the integer ipRangeStart/ipRangeEnd encodings
+	// inside dhcpSettings. Hard-coding the UI's defaults proved fragile
+	// across controller versions: each upgrade can add a new "must not be
+	// null" field. Fetching current state and overlaying the plan keeps
+	// us aligned with whatever the controller currently expects.
+	current, err := c.GetNetwork(ctx, siteID, networkID)
+	if err != nil {
+		return nil, fmt.Errorf("loading current network for update: %w", err)
+	}
+	req.LanNetwork = mergeInterfaceLanNetwork(current, &req.LanNetwork, networkID)
 
 	base := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/networks/%s", c.baseURL, c.omadacID, siteID, networkID)
 
