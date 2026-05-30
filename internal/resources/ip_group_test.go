@@ -6,8 +6,7 @@ import (
 	"testing"
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 )
 
 // =============================================================================
@@ -58,41 +57,53 @@ func TestNormalizeIPEntry_CIDRUnchanged(t *testing.T) {
 }
 
 // =============================================================================
-// Round-trip: config → wire → readback equality
+// Round-trip: config → wire → readback semantic equality
+//
+// These tests replace the former "plan modifier round-trip" tests. The plan
+// modifier approach was invalid (plan modifier cannot change a config-set known
+// value). The correct contract is now: config value is PRESERVED in state as-is
+// (e.g. "10.10.70.98"), and when the API returns the canonical form
+// ("10.10.70.98/32"), StringSemanticEquals treats them as equal — no diff.
 // =============================================================================
 
-// TestIPGroupEntry_RoundTrip_BareHostEqualsReadback verifies the full round-trip:
-//
-//	config "10.10.70.98" → normalizeIPEntry → "10.10.70.98/32"
-//	SplitCIDR("10.10.70.98/32") → {ip:"10.10.70.98", mask:32}
-//	API readback reconstructs → "10.10.70.98/32"
-//	planned == readback
-func TestIPGroupEntry_RoundTrip_BareHostEqualsReadback(t *testing.T) {
+// TestIPGroupEntry_RoundTrip_BareHostSemanticEqualsReadback verifies that the
+// config value ("10.10.70.98") and the API readback ("10.10.70.98/32") are
+// semantically equal via IPCIDRStringValue.StringSemanticEquals.
+// This replaces the former round-trip test that relied on the (invalid) plan
+// modifier normalizing the config value before comparison.
+func TestIPGroupEntry_RoundTrip_BareHostSemanticEqualsReadback(t *testing.T) {
+	ctx := context.Background()
+
 	configValue := "10.10.70.98"
 
-	// Step 1: normalize at plan time (what the plan modifier does).
-	planned := normalizeIPEntry(configValue)
-	if planned != "10.10.70.98/32" {
-		t.Fatalf("normalizeIPEntry(%q) = %q, want %q", configValue, planned, "10.10.70.98/32")
-	}
-
-	// Step 2: parse to wire format (what modelToIPList does).
-	ip, mask, err := client.SplitCIDR(planned)
+	// Step 1: SplitCIDR accepts bare host and produces {ip, mask:32}.
+	ip, mask, err := client.SplitCIDR(configValue)
 	if err != nil {
-		t.Fatalf("SplitCIDR(%q): %v", planned, err)
+		t.Fatalf("SplitCIDR(%q): %v", configValue, err)
 	}
 
-	// Step 3: reconstruct string (what setStateFromAPI does).
+	// Step 2: setStateFromAPI reconstructs CIDR string "10.10.70.98/32".
 	readback := fmt.Sprintf("%s/%d", ip, mask)
 
-	if readback != planned {
-		t.Errorf("round-trip mismatch: planned=%q, readback=%q (want equal)", planned, readback)
+	// Step 3: semantic equality must hold between config and readback.
+	configVal := IPCIDRStringValue{StringValue: basetypes.NewStringValue(configValue)}
+	readbackVal := IPCIDRStringValue{StringValue: basetypes.NewStringValue(readback)}
+
+	equal, diags := configVal.StringSemanticEquals(ctx, readbackVal)
+	if diags.HasError() {
+		t.Fatalf("StringSemanticEquals diagnostics: %v", diags)
+	}
+	if !equal {
+		t.Errorf("semantic equality: config=%q readback=%q — want semantically equal, got not equal", configValue, readback)
 	}
 }
 
-// TestIPGroupEntry_RoundTrip_CIDREqualsReadback verifies the same round-trip for
-// CIDR inputs — "10.10.10.0/24" must survive unchanged.
-func TestIPGroupEntry_RoundTrip_CIDREqualsReadback(t *testing.T) {
+// TestIPGroupEntry_RoundTrip_CIDRSemanticEqualsReadback verifies that CIDR
+// inputs ("10.10.10.0/24") survive the round-trip and compare as semantically
+// equal to their readback form (which is identical).
+func TestIPGroupEntry_RoundTrip_CIDRSemanticEqualsReadback(t *testing.T) {
+	ctx := context.Background()
+
 	cases := []string{
 		"10.10.10.0/24",
 		"192.168.1.0/24",
@@ -100,95 +111,23 @@ func TestIPGroupEntry_RoundTrip_CIDREqualsReadback(t *testing.T) {
 	}
 	for _, configValue := range cases {
 		t.Run(configValue, func(t *testing.T) {
-			planned := normalizeIPEntry(configValue)
-			ip, mask, err := client.SplitCIDR(planned)
+			ip, mask, err := client.SplitCIDR(configValue)
 			if err != nil {
-				t.Fatalf("SplitCIDR(%q): %v", planned, err)
+				t.Fatalf("SplitCIDR(%q): %v", configValue, err)
 			}
 			readback := fmt.Sprintf("%s/%d", ip, mask)
-			if readback != planned {
-				t.Errorf("round-trip mismatch: planned=%q, readback=%q (want equal)", planned, readback)
+
+			configVal := IPCIDRStringValue{StringValue: basetypes.NewStringValue(configValue)}
+			readbackVal := IPCIDRStringValue{StringValue: basetypes.NewStringValue(readback)}
+
+			equal, diags := configVal.StringSemanticEquals(ctx, readbackVal)
+			if diags.HasError() {
+				t.Fatalf("StringSemanticEquals diagnostics: %v", diags)
+			}
+			if !equal {
+				t.Errorf("semantic equality: config=%q readback=%q — want semantically equal, got not equal", configValue, readback)
 			}
 		})
-	}
-}
-
-// =============================================================================
-// Plan modifier — PlanModifyString behavior
-// =============================================================================
-
-// TestIPCIDRNormalizePlanModifier_BareHostNormalized asserts that the plan modifier
-// rewrites a bare host IP to "ip/32" in the planned value.
-func TestIPCIDRNormalizePlanModifier_BareHostNormalized(t *testing.T) {
-	m := ipCIDRNormalize{}
-
-	req := planmodifier.StringRequest{
-		ConfigValue: types.StringValue("10.10.70.98"),
-		PlanValue:   types.StringValue("10.10.70.98"),
-		StateValue:  types.StringNull(),
-	}
-	resp := &planmodifier.StringResponse{
-		PlanValue: req.PlanValue,
-	}
-
-	m.PlanModifyString(context.Background(), req, resp)
-
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("PlanModifyString diagnostics: %v", resp.Diagnostics)
-	}
-	want := "10.10.70.98/32"
-	if got := resp.PlanValue.ValueString(); got != want {
-		t.Errorf("PlanModifyString: PlanValue = %q, want %q", got, want)
-	}
-}
-
-// TestIPCIDRNormalizePlanModifier_CIDRUnchanged asserts that an existing CIDR
-// string passes through unchanged.
-func TestIPCIDRNormalizePlanModifier_CIDRUnchanged(t *testing.T) {
-	m := ipCIDRNormalize{}
-
-	for _, cidr := range []string{"10.10.10.0/24", "10.10.70.98/32"} {
-		t.Run(cidr, func(t *testing.T) {
-			req := planmodifier.StringRequest{
-				ConfigValue: types.StringValue(cidr),
-				PlanValue:   types.StringValue(cidr),
-				StateValue:  types.StringNull(),
-			}
-			resp := &planmodifier.StringResponse{
-				PlanValue: req.PlanValue,
-			}
-			m.PlanModifyString(context.Background(), req, resp)
-
-			if resp.Diagnostics.HasError() {
-				t.Fatalf("PlanModifyString diagnostics: %v", resp.Diagnostics)
-			}
-			if got := resp.PlanValue.ValueString(); got != cidr {
-				t.Errorf("PlanModifyString(%q): PlanValue = %q, want unchanged %q", cidr, got, cidr)
-			}
-		})
-	}
-}
-
-// TestIPCIDRNormalizePlanModifier_NullSkipped asserts that a null plan value is
-// left untouched (no panic, no modification).
-func TestIPCIDRNormalizePlanModifier_NullSkipped(t *testing.T) {
-	m := ipCIDRNormalize{}
-
-	req := planmodifier.StringRequest{
-		ConfigValue: types.StringNull(),
-		PlanValue:   types.StringNull(),
-		StateValue:  types.StringNull(),
-	}
-	resp := &planmodifier.StringResponse{
-		PlanValue: req.PlanValue,
-	}
-	m.PlanModifyString(context.Background(), req, resp)
-
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("PlanModifyString diagnostics: %v", resp.Diagnostics)
-	}
-	if !resp.PlanValue.IsNull() {
-		t.Errorf("PlanModifyString(null): PlanValue = %q, want null", resp.PlanValue.ValueString())
 	}
 }
 

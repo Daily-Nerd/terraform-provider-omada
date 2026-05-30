@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 )
 
 // normalizeIPEntry converts an ip attribute value to canonical "ip/mask" form.
@@ -25,30 +26,6 @@ func normalizeIPEntry(s string) string {
 		return s
 	}
 	return s + "/32"
-}
-
-// ipCIDRNormalize is a plan modifier for the nested ip attribute of ip_list.
-// It normalizes the planned value to canonical "ip/mask" form at plan time so
-// that the post-apply readback (which always produces "ip/mask") matches the
-// planned value, preventing the "provider produced inconsistent result" error
-// that occurs when a bare host IP like "10.10.70.98" is written to config but
-// the API returns it as "10.10.70.98/32".
-type ipCIDRNormalize struct{}
-
-func (m ipCIDRNormalize) Description(_ context.Context) string {
-	return "Normalizes bare host IPs to canonical ip/mask form (e.g. '10.10.70.98' → '10.10.70.98/32')."
-}
-
-func (m ipCIDRNormalize) MarkdownDescription(ctx context.Context) string {
-	return m.Description(ctx)
-}
-
-func (m ipCIDRNormalize) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
-	// Leave null/unknown values alone.
-	if req.PlanValue.IsNull() || req.PlanValue.IsUnknown() {
-		return
-	}
-	resp.PlanValue = types.StringValue(normalizeIPEntry(req.PlanValue.ValueString()))
 }
 
 // ipGroupTypeForEntries returns 0 (IP-only) when no entries carry ports, 1 otherwise.
@@ -85,8 +62,8 @@ type IPGroupResourceModel struct {
 
 // IPGroupEntryModel represents a single IP + port combination.
 type IPGroupEntryModel struct {
-	IP       types.String `tfsdk:"ip"`
-	PortList types.List   `tfsdk:"port_list"`
+	IP       IPCIDRStringValue `tfsdk:"ip"`
+	PortList types.List        `tfsdk:"port_list"`
 }
 
 func NewIPGroupResource() resource.Resource {
@@ -126,11 +103,10 @@ func (r *IPGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					Attributes: map[string]schema.Attribute{
 						"ip": schema.StringAttribute{
 							Description: "IP address or CIDR subnet (e.g., '192.168.1.100' or '192.168.1.0/24'). " +
-								"Bare host addresses are normalized to canonical ip/mask form (e.g. '10.10.70.98' → '10.10.70.98/32').",
-							Required: true,
-							PlanModifiers: []planmodifier.String{
-								ipCIDRNormalize{},
-							},
+								"A bare host address ('10.10.70.98') is treated as semantically equal to its " +
+								"canonical CIDR form ('10.10.70.98/32') — no perpetual diff after apply.",
+							Required:   true,
+							CustomType: IPCIDRStringType{},
 						},
 						"port_list": schema.ListAttribute{
 							Description: "List of port numbers or ranges as strings (e.g., '80', '7000-7100').",
@@ -336,7 +312,7 @@ func (r *IPGroupResource) setStateFromAPI(ctx context.Context, model *IPGroupRes
 		// Reconstruct CIDR string: "10.10.50.0/24" or "10.10.70.98/32".
 		cidr := fmt.Sprintf("%s/%d", entry.IP, entry.Mask)
 		model.IPList[i] = IPGroupEntryModel{
-			IP: types.StringValue(cidr),
+			IP: IPCIDRStringValue{StringValue: basetypes.NewStringValue(cidr)},
 		}
 		if len(entry.PortList) > 0 {
 			portList, _ := types.ListValueFrom(ctx, types.StringType, entry.PortList)
