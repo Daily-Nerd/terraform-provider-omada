@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -199,6 +200,12 @@ func (r *IPGroupResource) Read(ctx context.Context, req resource.ReadRequest, re
 
 	group, err := r.client.GetIPGroup(ctx, siteID, state.ID.ValueString())
 	if err != nil {
+		if errors.Is(err, client.ErrNotFound) {
+			// Group was deleted out-of-band. Remove from state so Terraform
+			// plans to recreate it (drift detection) rather than hard-failing.
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Error reading IP group", err.Error())
 		return
 	}

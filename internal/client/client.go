@@ -42,6 +42,12 @@ type Client struct {
 // ErrReadOnly is returned when a write operation is attempted in read-only mode.
 var ErrReadOnly = fmt.Errorf("operation blocked: provider is in read_only mode — only data sources and imports are allowed")
 
+// ErrNotFound is returned when a requested resource does not exist on the
+// controller. Callers (resource Read methods) should check errors.Is(err,
+// ErrNotFound) and call resp.State.RemoveResource(ctx) to model drift
+// gracefully instead of surfacing a hard error.
+var ErrNotFound = fmt.Errorf("not found")
+
 // APIResponse is the standard response envelope from the Omada API.
 type APIResponse struct {
 	ErrorCode int             `json:"errorCode"`
@@ -2950,7 +2956,9 @@ func (c *Client) ListIPGroups(ctx context.Context, siteID string) ([]IPGroup, er
 	return groups, nil
 }
 
-// GetIPGroup returns a single IP group by ID.
+// GetIPGroup returns a single IP group by ID. Returns an error wrapping
+// ErrNotFound when the group is absent from the controller, allowing callers
+// to detect drift via errors.Is(err, ErrNotFound).
 func (c *Client) GetIPGroup(ctx context.Context, siteID, groupID string) (*IPGroup, error) {
 	groups, err := c.ListIPGroups(ctx, siteID)
 	if err != nil {
@@ -2961,7 +2969,7 @@ func (c *Client) GetIPGroup(ctx context.Context, siteID, groupID string) (*IPGro
 			return &g, nil
 		}
 	}
-	return nil, fmt.Errorf("IP group %q not found", groupID)
+	return nil, fmt.Errorf("IP group %q: %w", groupID, ErrNotFound)
 }
 
 // CreateIPGroup creates a new IP group.

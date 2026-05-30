@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1088,6 +1089,35 @@ func TestGetIPGroup_NotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("error = %q, expected to contain 'not found'", err.Error())
+	}
+}
+
+// TestGetIPGroup_NotFoundReturnsSentinel verifies that when the API returns a
+// list that does NOT contain the requested group ID, GetIPGroup returns an
+// error that wraps ErrNotFound so callers can detect drift via errors.Is.
+// RED: fails until GetIPGroup wraps ErrNotFound on the not-found path.
+func TestGetIPGroup_NotFoundReturnsSentinel(t *testing.T) {
+	// List contains a different group — the requested ID is absent.
+	other := IPGroup{ID: "ipg-other", Name: "Other Group", Type: 0,
+		IPList: []IPGroupEntry{{IP: "10.0.0.0", Mask: 8}}}
+
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result:    paginatedResponse(t, []IPGroup{other}),
+			})
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	_, err := c.GetIPGroup(context.Background(), "site-1", "6a1a9ee744a75c2be561188a")
+	if err == nil {
+		t.Fatal("GetIPGroup: expected error for absent group ID, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetIPGroup not-found error does not wrap ErrNotFound: %v", err)
 	}
 }
 
