@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -978,17 +979,17 @@ func TestDeleteACLRule(t *testing.T) {
 
 func TestListIPGroups(t *testing.T) {
 	groups := []IPGroup{
-		{ID: "ipg-1", Name: "DNS Servers", Type: 1, IPList: []IPGroupEntry{
-			{IP: "8.8.8.8", PortList: []string{"53"}},
-			{IP: "1.1.1.1", PortList: []string{"53"}},
+		{ID: "ipg-1", Name: "DNS Servers", Type: 0, IPList: []IPGroupEntry{
+			{IP: "8.8.8.8", Mask: 32, Description: ""},
+			{IP: "1.1.1.1", Mask: 32, Description: ""},
 		}},
-		{ID: "ipg-2", Name: "Web Servers", Type: 1, IPList: []IPGroupEntry{
-			{IP: "10.0.0.0/24", PortList: []string{"80", "443"}},
+		{ID: "ipg-2", Name: "Web Servers", Type: 0, IPList: []IPGroupEntry{
+			{IP: "10.0.0.0", Mask: 24, Description: ""},
 		}},
 	}
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/firewall/ipGroups": func(w http.ResponseWriter, r *http.Request) {
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				t.Errorf("expected GET, got %s", r.Method)
 			}
@@ -1017,14 +1018,14 @@ func TestListIPGroups(t *testing.T) {
 	if got[0].IPList[0].IP != "8.8.8.8" {
 		t.Errorf("groups[0].IPList[0].IP = %q, want %q", got[0].IPList[0].IP, "8.8.8.8")
 	}
-	if got[0].IPList[0].PortList[0] != "53" {
-		t.Errorf("groups[0].IPList[0].PortList[0] = %q, want %q", got[0].IPList[0].PortList[0], "53")
+	if got[0].IPList[0].Mask != 32 {
+		t.Errorf("groups[0].IPList[0].Mask = %d, want 32", got[0].IPList[0].Mask)
 	}
 }
 
 func TestListIPGroups_Empty(t *testing.T) {
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/firewall/ipGroups": func(w http.ResponseWriter, r *http.Request) {
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(APIResponse{
 				ErrorCode: 0,
 				Result:    paginatedResponse(t, []IPGroup{}),
@@ -1045,12 +1046,12 @@ func TestListIPGroups_Empty(t *testing.T) {
 
 func TestGetIPGroup_Found(t *testing.T) {
 	groups := []IPGroup{
-		{ID: "ipg-1", Name: "DNS Servers", Type: 1},
-		{ID: "ipg-2", Name: "Web Servers", Type: 1},
+		{ID: "ipg-1", Name: "DNS Servers", Type: 0},
+		{ID: "ipg-2", Name: "Web Servers", Type: 0},
 	}
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/firewall/ipGroups": func(w http.ResponseWriter, r *http.Request) {
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(APIResponse{
 				ErrorCode: 0,
 				Result:    paginatedResponse(t, groups),
@@ -1071,7 +1072,7 @@ func TestGetIPGroup_Found(t *testing.T) {
 
 func TestGetIPGroup_NotFound(t *testing.T) {
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/firewall/ipGroups": func(w http.ResponseWriter, r *http.Request) {
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(APIResponse{
 				ErrorCode: 0,
 				Result:    paginatedResponse(t, []IPGroup{}),
@@ -1092,12 +1093,12 @@ func TestGetIPGroup_NotFound(t *testing.T) {
 
 func TestCreateIPGroup(t *testing.T) {
 	created := IPGroup{
-		ID: "ipg-new", Name: "New Group", Type: 1,
-		IPList: []IPGroupEntry{{IP: "192.168.1.0/24", PortList: []string{"80"}}},
+		ID: "ipg-new", Name: "New Group", Type: 0,
+		IPList: []IPGroupEntry{{IP: "192.168.1.0", Mask: 24, Description: ""}},
 	}
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/firewall/ipGroups": func(w http.ResponseWriter, r *http.Request) {
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				t.Errorf("expected POST, got %s", r.Method)
 			}
@@ -1111,8 +1112,8 @@ func TestCreateIPGroup(t *testing.T) {
 	c := newTestClient(t, server)
 
 	input := &IPGroup{
-		Name: "New Group", Type: 1,
-		IPList: []IPGroupEntry{{IP: "192.168.1.0/24", PortList: []string{"80"}}},
+		Name: "New Group", Type: 0,
+		IPList: []IPGroupEntry{{IP: "192.168.1.0", Mask: 24, Description: ""}},
 	}
 	got, err := c.CreateIPGroup(context.Background(), "site-1", input)
 	if err != nil {
@@ -1121,21 +1122,24 @@ func TestCreateIPGroup(t *testing.T) {
 	if got.ID != "ipg-new" {
 		t.Errorf("ID = %q, want %q", got.ID, "ipg-new")
 	}
-	if got.IPList[0].IP != "192.168.1.0/24" {
-		t.Errorf("IPList[0].IP = %q, want %q", got.IPList[0].IP, "192.168.1.0/24")
+	if got.IPList[0].IP != "192.168.1.0" {
+		t.Errorf("IPList[0].IP = %q, want %q", got.IPList[0].IP, "192.168.1.0")
+	}
+	if got.IPList[0].Mask != 24 {
+		t.Errorf("IPList[0].Mask = %d, want 24", got.IPList[0].Mask)
 	}
 }
 
 func TestUpdateIPGroup(t *testing.T) {
 	updated := IPGroup{
-		ID: "ipg-1", Name: "Updated Group", Type: 1,
-		IPList: []IPGroupEntry{{IP: "10.0.0.0/8"}},
+		ID: "ipg-1", Name: "Updated Group", Type: 0,
+		IPList: []IPGroupEntry{{IP: "10.0.0.0", Mask: 8}},
 	}
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/firewall/ipGroups/ipg-1": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPatch {
-				t.Errorf("expected PATCH, got %s", r.Method)
+		"/sites/site-1/setting/profiles/groups/ipg-1": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPut {
+				t.Errorf("expected PUT, got %s", r.Method)
 			}
 			json.NewEncoder(w).Encode(APIResponse{
 				ErrorCode: 0,
@@ -1146,7 +1150,7 @@ func TestUpdateIPGroup(t *testing.T) {
 	defer server.Close()
 	c := newTestClient(t, server)
 
-	input := &IPGroup{Name: "Updated Group", Type: 1, IPList: []IPGroupEntry{{IP: "10.0.0.0/8"}}}
+	input := &IPGroup{Name: "Updated Group", Type: 0, IPList: []IPGroupEntry{{IP: "10.0.0.0", Mask: 8}}}
 	got, err := c.UpdateIPGroup(context.Background(), "site-1", "ipg-1", input)
 	if err != nil {
 		t.Fatalf("UpdateIPGroup: %v", err)
@@ -1158,12 +1162,12 @@ func TestUpdateIPGroup(t *testing.T) {
 
 func TestUpdateIPGroup_EmptyResult(t *testing.T) {
 	groups := []IPGroup{
-		{ID: "ipg-1", Name: "Refreshed Group", Type: 1, IPList: []IPGroupEntry{{IP: "10.0.0.0/8"}}},
+		{ID: "ipg-1", Name: "Refreshed Group", Type: 0, IPList: []IPGroupEntry{{IP: "10.0.0.0", Mask: 8}}},
 	}
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/firewall/ipGroups/ipg-1": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPatch {
+		"/sites/site-1/setting/profiles/groups/ipg-1": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
 				json.NewEncoder(w).Encode(APIResponse{
 					ErrorCode: 0,
 					Result:    json.RawMessage(`{}`),
@@ -1171,7 +1175,7 @@ func TestUpdateIPGroup_EmptyResult(t *testing.T) {
 				return
 			}
 		},
-		"/sites/site-1/setting/firewall/ipGroups": func(w http.ResponseWriter, r *http.Request) {
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(APIResponse{
 				ErrorCode: 0,
 				Result:    paginatedResponse(t, groups),
@@ -1181,7 +1185,7 @@ func TestUpdateIPGroup_EmptyResult(t *testing.T) {
 	defer server.Close()
 	c := newTestClient(t, server)
 
-	input := &IPGroup{Name: "Refreshed Group", Type: 1}
+	input := &IPGroup{Name: "Refreshed Group", Type: 0}
 	got, err := c.UpdateIPGroup(context.Background(), "site-1", "ipg-1", input)
 	if err != nil {
 		t.Fatalf("UpdateIPGroup (empty result): %v", err)
@@ -1193,7 +1197,7 @@ func TestUpdateIPGroup_EmptyResult(t *testing.T) {
 
 func TestDeleteIPGroup(t *testing.T) {
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/firewall/ipGroups/ipg-1": func(w http.ResponseWriter, r *http.Request) {
+		"/sites/site-1/setting/profiles/groups/ipg-1": func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodDelete {
 				t.Errorf("expected DELETE, got %s", r.Method)
 			}
@@ -1209,6 +1213,224 @@ func TestDeleteIPGroup(t *testing.T) {
 	err := c.DeleteIPGroup(context.Background(), "site-1", "ipg-1")
 	if err != nil {
 		t.Fatalf("DeleteIPGroup: %v", err)
+	}
+}
+
+// =============================================================================
+// IP Group v6 / profiles/groups path tests (RED → GREEN with v6 fix)
+// =============================================================================
+
+// TestIPGroup_CreateUsesProfilesGroupsPath asserts that CreateIPGroup POSTs to
+// /setting/profiles/groups (the v6/ER707 path) and NOT to /setting/firewall/ipGroups.
+func TestIPGroup_CreateUsesProfilesGroupsPath(t *testing.T) {
+	created := IPGroup{
+		ID:   "ipg-v6",
+		Name: "Trusted Nets",
+		Type: 0,
+		IPList: []IPGroupEntry{
+			{IP: "10.10.50.0", Mask: 24, Description: ""},
+		},
+	}
+
+	hitCorrectPath := false
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST on profiles/groups, got %s", r.Method)
+			}
+			hitCorrectPath = true
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result:    mustMarshal(t, created),
+			})
+		},
+		// Any hit to the old path should 404 so the test catches regressions.
+		"/sites/site-1/setting/firewall/ipGroups": func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("CreateIPGroup hit legacy path /setting/firewall/ipGroups — should use /setting/profiles/groups")
+			http.NotFound(w, r)
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	input := &IPGroup{
+		Name: "Trusted Nets",
+		Type: 0,
+		IPList: []IPGroupEntry{
+			{IP: "10.10.50.0", Mask: 24, Description: ""},
+		},
+	}
+	got, err := c.CreateIPGroup(context.Background(), "site-1", input)
+	if err != nil {
+		t.Fatalf("CreateIPGroup v6: %v", err)
+	}
+	if !hitCorrectPath {
+		t.Error("CreateIPGroup did not hit /setting/profiles/groups")
+	}
+	if got.ID != "ipg-v6" {
+		t.Errorf("ID = %q, want %q", got.ID, "ipg-v6")
+	}
+}
+
+// TestIPGroup_V6BodyShape asserts the marshaled create body matches the v6 wire shape:
+//   - ipList entries have {ip, mask (int), description} — no CIDR string
+//   - a /24 CIDR input produces mask:24; a bare host produces mask:32
+//   - type:0 for IP-only groups
+//   - null envelope fields present (ipv6List, macAddressList, portList, countryList, etc.)
+func TestIPGroup_V6BodyShape(t *testing.T) {
+	var capturedBody []byte
+
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
+			var err error
+			capturedBody, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("reading body: %v", err)
+			}
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result: mustMarshal(t, IPGroup{
+					ID: "ipg-shape", Name: "Shape Test", Type: 0,
+					IPList: []IPGroupEntry{
+						{IP: "10.10.50.0", Mask: 24},
+						{IP: "10.10.70.98", Mask: 32},
+					},
+				}),
+			})
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	input := &IPGroup{
+		Name: "Shape Test",
+		Type: 0,
+		IPList: []IPGroupEntry{
+			{IP: "10.10.50.0", Mask: 24, Description: ""},
+			{IP: "10.10.70.98", Mask: 32, Description: ""},
+		},
+	}
+	if _, err := c.CreateIPGroup(context.Background(), "site-1", input); err != nil {
+		t.Fatalf("CreateIPGroup body-shape: %v", err)
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+
+	// type must be 0
+	if tp, _ := body["type"].(float64); tp != 0 {
+		t.Errorf("type = %v, want 0", body["type"])
+	}
+
+	// ipList entries must be {ip, mask (number), description}
+	ipListRaw, ok := body["ipList"].([]interface{})
+	if !ok || len(ipListRaw) != 2 {
+		t.Fatalf("ipList = %v, want 2 entries", body["ipList"])
+	}
+
+	entry0, _ := ipListRaw[0].(map[string]interface{})
+	if entry0["ip"] != "10.10.50.0" {
+		t.Errorf("entry0.ip = %v, want 10.10.50.0", entry0["ip"])
+	}
+	if mask, _ := entry0["mask"].(float64); mask != 24 {
+		t.Errorf("entry0.mask = %v, want 24", entry0["mask"])
+	}
+	if _, hasDesc := entry0["description"]; !hasDesc {
+		t.Error("entry0 missing description field")
+	}
+
+	entry1, _ := ipListRaw[1].(map[string]interface{})
+	if entry1["ip"] != "10.10.70.98" {
+		t.Errorf("entry1.ip = %v, want 10.10.70.98", entry1["ip"])
+	}
+	if mask, _ := entry1["mask"].(float64); mask != 32 {
+		t.Errorf("entry1.mask = %v, want 32 (bare host)", entry1["mask"])
+	}
+
+	// null envelope fields must be present (JSON null)
+	for _, nullField := range []string{"ipv6List", "macAddressList", "portList", "countryList", "portType", "portMaskList", "domainNamePort", "ouiList"} {
+		if _, exists := body[nullField]; !exists {
+			t.Errorf("body missing null envelope field %q", nullField)
+		}
+	}
+
+	// count must be present
+	if _, exists := body["count"]; !exists {
+		t.Error("body missing count field")
+	}
+}
+
+// TestCIDRSplitHelper tests the splitCIDR helper that converts CIDR-or-bare-IP
+// strings into separate (ip, mask) pairs for the v6 wire body.
+func TestCIDRSplitHelper(t *testing.T) {
+	cases := []struct {
+		input    string
+		wantIP   string
+		wantMask int
+		wantErr  bool
+	}{
+		{"10.10.50.0/24", "10.10.50.0", 24, false},
+		{"192.168.1.0/24", "192.168.1.0", 24, false},
+		{"10.10.70.98/32", "10.10.70.98", 32, false},
+		{"10.10.70.98", "10.10.70.98", 32, false}, // bare host → mask 32
+		{"8.8.8.8", "8.8.8.8", 32, false},
+		{"not-an-ip", "", 0, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			ip, mask, err := SplitCIDR(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("SplitCIDR(%q): expected error, got nil", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("SplitCIDR(%q): unexpected error: %v", tc.input, err)
+				return
+			}
+			if ip != tc.wantIP {
+				t.Errorf("SplitCIDR(%q).ip = %q, want %q", tc.input, ip, tc.wantIP)
+			}
+			if mask != tc.wantMask {
+				t.Errorf("SplitCIDR(%q).mask = %d, want %d", tc.input, mask, tc.wantMask)
+			}
+		})
+	}
+}
+
+// TestIPGroup_UpdateUsesPUT asserts UpdateIPGroup uses PUT (not PATCH) to
+// /setting/profiles/groups/{id}, mirroring the ACL update fix on this branch.
+func TestIPGroup_UpdateUsesPUT(t *testing.T) {
+	updated := IPGroup{
+		ID: "ipg-1", Name: "Updated Group", Type: 0,
+		IPList: []IPGroupEntry{{IP: "10.0.0.0", Mask: 8}},
+	}
+
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites/site-1/setting/profiles/groups/ipg-1": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPut {
+				t.Errorf("expected PUT on profiles/groups/{id}, got %s", r.Method)
+			}
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result:    mustMarshal(t, updated),
+			})
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	input := &IPGroup{Name: "Updated Group", Type: 0, IPList: []IPGroupEntry{{IP: "10.0.0.0", Mask: 8}}}
+	got, err := c.UpdateIPGroup(context.Background(), "site-1", "ipg-1", input)
+	if err != nil {
+		t.Fatalf("UpdateIPGroup v6: %v", err)
+	}
+	if got.Name != "Updated Group" {
+		t.Errorf("Name = %q, want %q", got.Name, "Updated Group")
 	}
 }
 

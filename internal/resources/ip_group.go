@@ -13,6 +13,21 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
+// ipGroupTypeForEntries returns 0 (IP-only) when no entries carry ports, 1 otherwise.
+func ipGroupTypeForEntries(entries []IPGroupEntryModel) int {
+	for _, e := range entries {
+		if !e.PortList.IsNull() && !e.PortList.IsUnknown() {
+			var ports []string
+			// We ignore the error here — a non-nil list means ports are set.
+			_ = e.PortList.ElementsAs(context.Background(), &ports, false)
+			if len(ports) > 0 {
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
 var _ resource.Resource = &IPGroupResource{}
 var _ resource.ResourceWithImportState = &IPGroupResource{}
 
@@ -63,7 +78,7 @@ func (r *IPGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Required:    true,
 			},
 			"type": schema.Int64Attribute{
-				Description: "The group type. Use 1 for IP/Port group.",
+				Description: "The group type. 0 = IP-only group, 1 = IP/Port group. Computed from whether any entry has ports.",
 				Computed:    true,
 			},
 			"ip_list": schema.ListNestedAttribute{
@@ -118,7 +133,7 @@ func (r *IPGroupResource) Create(ctx context.Context, req resource.CreateRequest
 
 	group := &client.IPGroup{
 		Name:   plan.Name.ValueString(),
-		Type:   1, // IP/Port group
+		Type:   ipGroupTypeForEntries(plan.IPList),
 		IPList: ipList,
 	}
 
@@ -173,7 +188,7 @@ func (r *IPGroupResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	group := &client.IPGroup{
 		Name:   plan.Name.ValueString(),
-		Type:   1,
+		Type:   ipGroupTypeForEntries(plan.IPList),
 		IPList: ipList,
 	}
 
@@ -227,11 +242,25 @@ func (r *IPGroupResource) ImportState(ctx context.Context, req resource.ImportSt
 }
 
 // modelToIPList converts the Terraform model to the client IPGroupEntry slice.
+// The ip attribute accepts either a CIDR string ("10.10.50.0/24") or a bare
+// host address ("10.10.70.98"). splitCIDR splits it into the separate ip + mask
+// integer required by the v6/ER707 wire body.
 func (r *IPGroupResource) modelToIPList(ctx context.Context, entries []IPGroupEntryModel, diags *diag.Diagnostics) []client.IPGroupEntry {
 	var ipList []client.IPGroupEntry
 	for _, e := range entries {
+		rawIP := e.IP.ValueString()
+		ip, mask, err := client.SplitCIDR(rawIP)
+		if err != nil {
+			diags.AddError(
+				"Invalid IP address in ip_list",
+				fmt.Sprintf("ip_list entry %q is not a valid IP or CIDR: %v", rawIP, err),
+			)
+			return nil
+		}
 		entry := client.IPGroupEntry{
-			IP: e.IP.ValueString(),
+			IP:          ip,
+			Mask:        mask,
+			Description: "",
 		}
 		if !e.PortList.IsNull() && !e.PortList.IsUnknown() {
 			var ports []string
@@ -247,6 +276,8 @@ func (r *IPGroupResource) modelToIPList(ctx context.Context, entries []IPGroupEn
 }
 
 // setStateFromAPI populates the resource model from an API response.
+// The v6 API returns ip (bare address) and mask (integer) separately; we
+// reconstruct the CIDR string stored in state so the HCL attribute stays stable.
 func (r *IPGroupResource) setStateFromAPI(ctx context.Context, model *IPGroupResourceModel, group *client.IPGroup) {
 	model.ID = types.StringValue(group.ID)
 	model.Name = types.StringValue(group.Name)
@@ -254,8 +285,10 @@ func (r *IPGroupResource) setStateFromAPI(ctx context.Context, model *IPGroupRes
 
 	model.IPList = make([]IPGroupEntryModel, len(group.IPList))
 	for i, entry := range group.IPList {
+		// Reconstruct CIDR string: "10.10.50.0/24" or "10.10.70.98/32".
+		cidr := fmt.Sprintf("%s/%d", entry.IP, entry.Mask)
 		model.IPList[i] = IPGroupEntryModel{
-			IP: types.StringValue(entry.IP),
+			IP: types.StringValue(cidr),
 		}
 		if len(entry.PortList) > 0 {
 			portList, _ := types.ListValueFrom(ctx, types.StringType, entry.PortList)

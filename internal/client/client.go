@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
@@ -2853,24 +2854,90 @@ func (c *Client) ModifyACLIndex(ctx context.Context, siteID string, aclType int,
 
 // --- IP Groups ---
 
-// IPGroupEntry represents a single IP + port combination within an IP group.
+// SplitCIDR parses a CIDR-or-bare-IP string into a bare IP address and integer
+// prefix length. A bare host address (no "/" suffix) yields mask 32.
+// Returns an error if the string is not a valid IP or CIDR.
+//
+// Examples:
+//
+//	"10.10.50.0/24"  → ("10.10.50.0", 24, nil)
+//	"10.10.70.98"    → ("10.10.70.98", 32, nil)
+//	"not-an-ip"      → ("", 0, error)
+func SplitCIDR(cidrOrIP string) (string, int, error) {
+	// Try parsing as CIDR first (e.g. "10.10.50.0/24").
+	ip, ipNet, err := net.ParseCIDR(cidrOrIP)
+	if err == nil {
+		ones, _ := ipNet.Mask.Size()
+		// ParseCIDR masks the host bits; use the original parsed IP (host addr).
+		return ip.String(), ones, nil
+	}
+	// Fall back to bare IP (no prefix → mask 32).
+	parsed := net.ParseIP(cidrOrIP)
+	if parsed == nil {
+		return "", 0, fmt.Errorf("invalid IP or CIDR: %q", cidrOrIP)
+	}
+	return parsed.String(), 32, nil
+}
+
+// IPGroupEntry represents a single IP entry within an IP group using the v6
+// wire shape: bare IP address + integer mask (not a CIDR string) + description.
 type IPGroupEntry struct {
-	IP       string   `json:"ip"`
-	PortList []string `json:"portList,omitempty"` // port numbers/ranges as strings (e.g., "80", "7000-7100")
+	IP          string   `json:"ip"`
+	Mask        int      `json:"mask"`
+	Description string   `json:"description"`
+	PortList    []string `json:"portList,omitempty"` // port numbers/ranges (e.g. "80", "7000-7100")
+}
+
+// ipGroupWire is the v6 wire body for create/update. It includes all envelope
+// fields that the ER707 controller requires even when null.
+type ipGroupWire struct {
+	Name           string         `json:"name"`
+	Type           int            `json:"type"`
+	IPList         []IPGroupEntry `json:"ipList"`
+	IPv6List       interface{}    `json:"ipv6List"`
+	MACAddressList interface{}    `json:"macAddressList"`
+	PortList       interface{}    `json:"portList"`
+	CountryList    interface{}    `json:"countryList"`
+	Description    string         `json:"description"`
+	PortType       interface{}    `json:"portType"`
+	PortMaskList   interface{}    `json:"portMaskList"`
+	DomainNamePort interface{}    `json:"domainNamePort"`
+	OUIList        interface{}    `json:"ouiList"`
+	Count          int            `json:"count"`
 }
 
 // IPGroup represents an IP/Port group used in ACL rules.
 type IPGroup struct {
 	ID     string         `json:"id,omitempty"`
 	Name   string         `json:"name"`
-	Type   int            `json:"type"` // 1=IP/Port group
+	Type   int            `json:"type"` // 0=IP-only, 1=IP/Port group
 	IPList []IPGroupEntry `json:"ipList"`
+}
+
+// toWire converts an IPGroup to the v6 wire shape with null envelope fields.
+func (g *IPGroup) toWire() *ipGroupWire {
+	return &ipGroupWire{
+		Name:           g.Name,
+		Type:           g.Type,
+		IPList:         g.IPList,
+		IPv6List:       nil,
+		MACAddressList: nil,
+		PortList:       nil,
+		CountryList:    nil,
+		Description:    "",
+		PortType:       nil,
+		PortMaskList:   nil,
+		DomainNamePort: nil,
+		OUIList:        nil,
+		Count:          0,
+	}
 }
 
 // ListIPGroups returns all IP groups for a site.
 // Note: requires a gateway device adopted into the site.
+// Endpoint: GET /setting/profiles/groups (v6/ER707 path).
 func (c *Client) ListIPGroups(ctx context.Context, siteID string) ([]IPGroup, error) {
-	resp, err := c.doSiteRequestWithParams(ctx, siteID, http.MethodGet, "/setting/firewall/ipGroups", "&currentPage=1&currentPageSize=100", nil)
+	resp, err := c.doSiteRequestWithParams(ctx, siteID, http.MethodGet, "/setting/profiles/groups", "&currentPage=1&currentPageSize=100", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2896,8 +2963,10 @@ func (c *Client) GetIPGroup(ctx context.Context, siteID, groupID string) (*IPGro
 }
 
 // CreateIPGroup creates a new IP group.
+// Endpoint: POST /setting/profiles/groups (v6/ER707 path).
+// The request body uses the v6 wire shape with explicit null envelope fields.
 func (c *Client) CreateIPGroup(ctx context.Context, siteID string, group *IPGroup) (*IPGroup, error) {
-	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPost, "/setting/firewall/ipGroups", group)
+	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPost, "/setting/profiles/groups", group.toWire())
 	if err != nil {
 		return nil, err
 	}
@@ -2909,9 +2978,13 @@ func (c *Client) CreateIPGroup(ctx context.Context, siteID string, group *IPGrou
 	return &created, nil
 }
 
-// UpdateIPGroup updates an existing IP group.
+// UpdateIPGroup updates an existing IP group via PUT.
+// Endpoint: PUT /setting/profiles/groups/{id} (v6/ER707 path).
+// The v6/ER707 controller returns -1600 ("Unsupported request path") for PATCH
+// on profiles/groups endpoints; PUT is the correct verb per the UI-observed API
+// contract (same fix applied to UpdateACLRule on this branch).
 func (c *Client) UpdateIPGroup(ctx context.Context, siteID, groupID string, group *IPGroup) (*IPGroup, error) {
-	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPatch, fmt.Sprintf("/setting/firewall/ipGroups/%s", groupID), group)
+	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPut, fmt.Sprintf("/setting/profiles/groups/%s", groupID), group.toWire())
 	if err != nil {
 		return nil, err
 	}
@@ -2926,8 +2999,9 @@ func (c *Client) UpdateIPGroup(ctx context.Context, siteID, groupID string, grou
 }
 
 // DeleteIPGroup deletes an IP group.
+// Endpoint: DELETE /setting/profiles/groups/{id} (v6/ER707 path).
 func (c *Client) DeleteIPGroup(ctx context.Context, siteID, groupID string) error {
-	_, err := c.doSiteRequest(ctx, siteID, http.MethodDelete, fmt.Sprintf("/setting/firewall/ipGroups/%s", groupID), nil)
+	_, err := c.doSiteRequest(ctx, siteID, http.MethodDelete, fmt.Sprintf("/setting/profiles/groups/%s", groupID), nil)
 	return err
 }
 
