@@ -13,6 +13,12 @@
 
 ### Features
 
+* **firewall_acl_order:** new resource for declarative ACL rule ordering.
+  Manages the global first-match order for gateway, switch, or EAP ACL rules on a
+  per-site basis. Omada assigns index by creation order; this resource lets you
+  override it via a batch `ModifyACLIndex` command. Owns order only for the rule IDs
+  you specify; rules not listed are untouched. Delete is a no-op (stops managing
+  order without altering rules).
 * **switch_port:** write path migrated to openapi/v1
   (`/openapi/v1/{omadacId}/sites/{siteId}/switches/{mac}/ports/{port}`).
   This fixes `-1001` errors on non-pristine ports and `-39840` on `access_*`
@@ -27,6 +33,9 @@
 
 ### Bug Fixes
 
+* **firewall_acl:** rule updates now use the controller's PUT endpoint.
+  The api/v2 PATCH path returns `-1600 Unsupported request path` on v6 controllers
+  (e.g., ER707); switching to PUT resolves the issue. Fixes [#10](https://github.com/Daily-Nerd/terraform-provider-omada/issues/10).
 * **switch_port:** `speed` codes 1, 2, 7, 8 (10Mb HD/FD, 5Gb, 10Gb) have no
   confirmed openapi/v1 `linkSpeed` values on the tested hardware (SG3218XP-M2).
   They now silently fall back to auto-negotiate (`linkSpeed=0, duplex=0`) rather
