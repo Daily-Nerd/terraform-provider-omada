@@ -150,34 +150,37 @@ func (r *ACLRuleResource) Configure(_ context.Context, req resource.ConfigureReq
 	r.client = c
 }
 
-func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var plan ACLRuleResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	siteID := plan.SiteID.ValueString()
-
+// buildACLRuleFromPlan constructs a client.ACLRule from the resource plan.
+// Empty custom-ACL slices (customAclOsws/Stacks/Devices) and direction arrays
+// (wanInIds/vpnInIds) are always initialized to []string{} so they serialize
+// as [] rather than null, satisfying the controller's schema validation.
+// Errors are appended to errs; callers must check before using the result.
+func buildACLRuleFromPlan(ctx context.Context, plan *ACLRuleResourceModel, errs *[]error) *client.ACLRule {
 	var protocols []int
-	resp.Diagnostics.Append(plan.Protocols.ElementsAs(ctx, &protocols, false)...)
-	if resp.Diagnostics.HasError() {
-		return
+	if diags := plan.Protocols.ElementsAs(ctx, &protocols, false); diags.HasError() {
+		for _, d := range diags {
+			*errs = append(*errs, fmt.Errorf("%s: %s", d.Summary(), d.Detail()))
+		}
+		return nil
 	}
 
 	var sourceIDs []string
-	resp.Diagnostics.Append(plan.SourceIDs.ElementsAs(ctx, &sourceIDs, false)...)
-	if resp.Diagnostics.HasError() {
-		return
+	if diags := plan.SourceIDs.ElementsAs(ctx, &sourceIDs, false); diags.HasError() {
+		for _, d := range diags {
+			*errs = append(*errs, fmt.Errorf("%s: %s", d.Summary(), d.Detail()))
+		}
+		return nil
 	}
 
 	var destIDs []string
-	resp.Diagnostics.Append(plan.DestinationIDs.ElementsAs(ctx, &destIDs, false)...)
-	if resp.Diagnostics.HasError() {
-		return
+	if diags := plan.DestinationIDs.ElementsAs(ctx, &destIDs, false); diags.HasError() {
+		for _, d := range diags {
+			*errs = append(*errs, fmt.Errorf("%s: %s", d.Summary(), d.Detail()))
+		}
+		return nil
 	}
 
-	rule := &client.ACLRule{
+	return &client.ACLRule{
 		Name:            plan.Name.ValueString(),
 		Type:            int(plan.Type.ValueInt64()),
 		Status:          plan.Status.ValueBool(),
@@ -191,7 +194,31 @@ func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest
 		Direction: client.ACLDirection{
 			LanToWan: plan.LanToWan.ValueBool(),
 			LanToLan: plan.LanToLan.ValueBool(),
+			WanInIDs: []string{},
+			VpnInIDs: []string{},
 		},
+		CustomAclOsws:    []string{},
+		CustomAclStacks:  []string{},
+		CustomAclDevices: []string{},
+	}
+}
+
+func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	var plan ACLRuleResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	siteID := plan.SiteID.ValueString()
+
+	var errs []error
+	rule := buildACLRuleFromPlan(ctx, &plan, &errs)
+	for _, e := range errs {
+		resp.Diagnostics.AddError("Error building ACL rule", e.Error())
+	}
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	created, err := r.client.CreateACLRule(ctx, siteID, rule)
@@ -239,39 +266,13 @@ func (r *ACLRuleResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	siteID := state.SiteID.ValueString()
 
-	var protocols []int
-	resp.Diagnostics.Append(plan.Protocols.ElementsAs(ctx, &protocols, false)...)
+	var errs []error
+	rule := buildACLRuleFromPlan(ctx, &plan, &errs)
+	for _, e := range errs {
+		resp.Diagnostics.AddError("Error building ACL rule", e.Error())
+	}
 	if resp.Diagnostics.HasError() {
 		return
-	}
-
-	var sourceIDs []string
-	resp.Diagnostics.Append(plan.SourceIDs.ElementsAs(ctx, &sourceIDs, false)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	var destIDs []string
-	resp.Diagnostics.Append(plan.DestinationIDs.ElementsAs(ctx, &destIDs, false)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	rule := &client.ACLRule{
-		Name:            plan.Name.ValueString(),
-		Type:            int(plan.Type.ValueInt64()),
-		Status:          plan.Status.ValueBool(),
-		Policy:          int(plan.Policy.ValueInt64()),
-		Protocols:       protocols,
-		SourceType:      int(plan.SourceType.ValueInt64()),
-		SourceIDs:       sourceIDs,
-		DestinationType: int(plan.DestinationType.ValueInt64()),
-		DestinationIDs:  destIDs,
-		BiDirectional:   plan.BiDirectional.ValueBool(),
-		Direction: client.ACLDirection{
-			LanToWan: plan.LanToWan.ValueBool(),
-			LanToLan: plan.LanToLan.ValueBool(),
-		},
 	}
 
 	updated, err := r.client.UpdateACLRule(ctx, siteID, state.ID.ValueString(), rule)
