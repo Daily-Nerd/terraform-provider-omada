@@ -1092,20 +1092,31 @@ func TestGetIPGroup_NotFound(t *testing.T) {
 }
 
 func TestCreateIPGroup(t *testing.T) {
-	created := IPGroup{
-		ID: "ipg-new", Name: "New Group", Type: 0,
-		IPList: []IPGroupEntry{{IP: "192.168.1.0", Mask: 24, Description: ""}},
-	}
+	// The v6/ER707 API returns a bare string ID on POST; the full object comes
+	// from the follow-up GET (list + filter).
+	fullGroup := json.RawMessage(`{"groupId":"ipg-new","name":"New Group","type":0,"ipList":[{"ip":"192.168.1.0","mask":24,"description":""}],"count":1}`)
+	paginatedRaw := mustMarshal(t, map[string]interface{}{
+		"totalRows": 1, "currentPage": 1, "currentSize": 100,
+		"data": []json.RawMessage{fullGroup},
+	})
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
 		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				t.Errorf("expected POST, got %s", r.Method)
+			if r.Method == http.MethodPost {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    json.RawMessage(`"ipg-new"`),
+				})
+				return
 			}
-			json.NewEncoder(w).Encode(APIResponse{
-				ErrorCode: 0,
-				Result:    mustMarshal(t, created),
-			})
+			if r.Method == http.MethodGet {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    paginatedRaw,
+				})
+				return
+			}
+			t.Errorf("unexpected method %s", r.Method)
 		},
 	})
 	defer server.Close()
@@ -1223,26 +1234,30 @@ func TestDeleteIPGroup(t *testing.T) {
 // TestIPGroup_CreateUsesProfilesGroupsPath asserts that CreateIPGroup POSTs to
 // /setting/profiles/groups (the v6/ER707 path) and NOT to /setting/firewall/ipGroups.
 func TestIPGroup_CreateUsesProfilesGroupsPath(t *testing.T) {
-	created := IPGroup{
-		ID:   "ipg-v6",
-		Name: "Trusted Nets",
-		Type: 0,
-		IPList: []IPGroupEntry{
-			{IP: "10.10.50.0", Mask: 24, Description: ""},
-		},
-	}
+	fullGroup := json.RawMessage(`{"groupId":"ipg-v6","name":"Trusted Nets","type":0,"ipList":[{"ip":"10.10.50.0","mask":24,"description":""}],"count":1}`)
+	paginatedRaw := mustMarshal(t, map[string]interface{}{
+		"totalRows": 1, "currentPage": 1, "currentSize": 100,
+		"data": []json.RawMessage{fullGroup},
+	})
 
-	hitCorrectPath := false
+	hitPost := false
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
 		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				t.Errorf("expected POST on profiles/groups, got %s", r.Method)
+			if r.Method == http.MethodPost {
+				hitPost = true
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    json.RawMessage(`"ipg-v6"`),
+				})
+				return
 			}
-			hitCorrectPath = true
-			json.NewEncoder(w).Encode(APIResponse{
-				ErrorCode: 0,
-				Result:    mustMarshal(t, created),
-			})
+			if r.Method == http.MethodGet {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    paginatedRaw,
+				})
+				return
+			}
 		},
 		// Any hit to the old path should 404 so the test catches regressions.
 		"/sites/site-1/setting/firewall/ipGroups": func(w http.ResponseWriter, r *http.Request) {
@@ -1264,8 +1279,8 @@ func TestIPGroup_CreateUsesProfilesGroupsPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIPGroup v6: %v", err)
 	}
-	if !hitCorrectPath {
-		t.Error("CreateIPGroup did not hit /setting/profiles/groups")
+	if !hitPost {
+		t.Error("CreateIPGroup did not hit /setting/profiles/groups with POST")
 	}
 	if got.ID != "ipg-v6" {
 		t.Errorf("ID = %q, want %q", got.ID, "ipg-v6")
@@ -1279,24 +1294,35 @@ func TestIPGroup_CreateUsesProfilesGroupsPath(t *testing.T) {
 //   - null envelope fields present (ipv6List, macAddressList, portList, countryList, etc.)
 func TestIPGroup_V6BodyShape(t *testing.T) {
 	var capturedBody []byte
+	// Full group returned by the follow-up GET (uses groupId as live API does).
+	fullGroup := json.RawMessage(`{"groupId":"ipg-shape","name":"Shape Test","type":0,"ipList":[{"ip":"10.10.50.0","mask":24,"description":""},{"ip":"10.10.70.98","mask":32,"description":""}],"count":2}`)
+	paginatedRaw := mustMarshal(t, map[string]interface{}{
+		"totalRows": 1, "currentPage": 1, "currentSize": 100,
+		"data": []json.RawMessage{fullGroup},
+	})
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
 		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
-			var err error
-			capturedBody, err = io.ReadAll(r.Body)
-			if err != nil {
-				t.Errorf("reading body: %v", err)
+			if r.Method == http.MethodPost {
+				var err error
+				capturedBody, err = io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("reading body: %v", err)
+				}
+				// Return string ID as real API does.
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    json.RawMessage(`"ipg-shape"`),
+				})
+				return
 			}
-			json.NewEncoder(w).Encode(APIResponse{
-				ErrorCode: 0,
-				Result: mustMarshal(t, IPGroup{
-					ID: "ipg-shape", Name: "Shape Test", Type: 0,
-					IPList: []IPGroupEntry{
-						{IP: "10.10.50.0", Mask: 24},
-						{IP: "10.10.70.98", Mask: 32},
-					},
-				}),
-			})
+			if r.Method == http.MethodGet {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    paginatedRaw,
+				})
+				return
+			}
 		},
 	})
 	defer server.Close()
@@ -1431,6 +1457,134 @@ func TestIPGroup_UpdateUsesPUT(t *testing.T) {
 	}
 	if got.Name != "Updated Group" {
 		t.Errorf("Name = %q, want %q", got.Name, "Updated Group")
+	}
+}
+
+// =============================================================================
+// IP Group v6 API field-name fix tests (groupId tag + string-id create)
+// =============================================================================
+
+// TestIPGroup_GroupIdTag_UnmarshalFromLiveAPI verifies that IPGroup.ID is
+// populated when the API returns "groupId" (the real v6 wire field name).
+// RED: fails with json:"id" tag; GREEN: passes with json:"groupId" tag.
+func TestIPGroup_GroupIdTag_UnmarshalFromLiveAPI(t *testing.T) {
+	// Realistic GET response from live ER707 controller.
+	rawJSON := `{"groupId":"6a1a9aa744a75c2be56115d0","site":"Default","name":"tf_pihole","ipList":[{"ip":"10.10.70.98","mask":32,"description":""}],"count":1,"type":0,"resource":0}`
+
+	var g IPGroup
+	if err := json.Unmarshal([]byte(rawJSON), &g); err != nil {
+		t.Fatalf("unmarshal IPGroup: %v", err)
+	}
+	if g.ID != "6a1a9aa744a75c2be56115d0" {
+		t.Errorf("IPGroup.ID = %q, want %q (check json tag: should be groupId not id)",
+			g.ID, "6a1a9aa744a75c2be56115d0")
+	}
+	if g.Name != "tf_pihole" {
+		t.Errorf("IPGroup.Name = %q, want %q", g.Name, "tf_pihole")
+	}
+	if len(g.IPList) != 1 {
+		t.Fatalf("IPGroup.IPList len = %d, want 1", len(g.IPList))
+	}
+	if g.IPList[0].IP != "10.10.70.98" {
+		t.Errorf("IPList[0].IP = %q, want %q", g.IPList[0].IP, "10.10.70.98")
+	}
+	if g.IPList[0].Mask != 32 {
+		t.Errorf("IPList[0].Mask = %d, want 32", g.IPList[0].Mask)
+	}
+}
+
+// TestGetIPGroup_UsesGroupIdForMatch verifies that GetIPGroup correctly matches
+// by ID when the server returns objects with the "groupId" field.
+// RED: fails with json:"id" because g.ID is empty → never matches.
+func TestGetIPGroup_UsesGroupIdForMatch(t *testing.T) {
+	// Raw paginated payload using "groupId" as the live API does.
+	rawGroup := json.RawMessage(`{"groupId":"abc123","name":"PiHole","type":0,"ipList":[{"ip":"10.10.70.98","mask":32,"description":""}],"count":1}`)
+	paginatedRaw := mustMarshal(t, map[string]interface{}{
+		"totalRows":   1,
+		"currentPage": 1,
+		"currentSize": 100,
+		"data":        []json.RawMessage{rawGroup},
+	})
+
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result:    paginatedRaw,
+			})
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	got, err := c.GetIPGroup(context.Background(), "site-1", "abc123")
+	if err != nil {
+		t.Fatalf("GetIPGroup with groupId field: %v", err)
+	}
+	if got.ID != "abc123" {
+		t.Errorf("ID = %q, want %q", got.ID, "abc123")
+	}
+}
+
+// TestCreateIPGroup_StringIDResult verifies that CreateIPGroup handles the real
+// v6 API response where "result" is a bare string ID, not a full IPGroup object.
+// Pattern mirrors CreateMDNSRule: unmarshal as string → follow-up GetIPGroup.
+// RED: current code tries json.Unmarshal(resp.Result, &IPGroup{}) → error.
+func TestCreateIPGroup_StringIDResult(t *testing.T) {
+	createdID := "6a1a9aa744a75c2be56115d0"
+	// Full object returned by the follow-up GET (uses "groupId" as real API does).
+	fullGroupRaw := json.RawMessage(`{"groupId":"6a1a9aa744a75c2be56115d0","name":"tf_pihole","type":0,"ipList":[{"ip":"10.10.70.98","mask":32,"description":""}],"count":1}`)
+	paginatedRaw := mustMarshal(t, map[string]interface{}{
+		"totalRows":   1,
+		"currentPage": 1,
+		"currentSize": 100,
+		"data":        []json.RawMessage{fullGroupRaw},
+	})
+
+	callCount := 0
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites/site-1/setting/profiles/groups": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				// Real v6 API: returns bare string ID.
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    json.RawMessage(`"` + createdID + `"`),
+				})
+				return
+			}
+			if r.Method == http.MethodGet {
+				callCount++
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    paginatedRaw,
+				})
+				return
+			}
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	input := &IPGroup{
+		Name:   "tf_pihole",
+		Type:   0,
+		IPList: []IPGroupEntry{{IP: "10.10.70.98", Mask: 32, Description: ""}},
+	}
+	got, err := c.CreateIPGroup(context.Background(), "site-1", input)
+	if err != nil {
+		t.Fatalf("CreateIPGroup (string-id result): %v", err)
+	}
+	if got.ID != createdID {
+		t.Errorf("ID = %q, want %q", got.ID, createdID)
+	}
+	if got.Name != "tf_pihole" {
+		t.Errorf("Name = %q, want %q", got.Name, "tf_pihole")
+	}
+	if len(got.IPList) != 1 || got.IPList[0].IP != "10.10.70.98" {
+		t.Errorf("IPList = %v, want [{10.10.70.98 32 }]", got.IPList)
+	}
+	if callCount == 0 {
+		t.Error("expected at least one GET call to re-fetch after create; got 0")
 	}
 }
 

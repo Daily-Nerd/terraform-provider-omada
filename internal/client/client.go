@@ -2907,8 +2907,10 @@ type ipGroupWire struct {
 }
 
 // IPGroup represents an IP/Port group used in ACL rules.
+// The v6/ER707 controller uses "groupId" (not "id") as the field name in GET
+// responses for /setting/profiles/groups.
 type IPGroup struct {
-	ID     string         `json:"id,omitempty"`
+	ID     string         `json:"groupId,omitempty"`
 	Name   string         `json:"name"`
 	Type   int            `json:"type"` // 0=IP-only, 1=IP/Port group
 	IPList []IPGroupEntry `json:"ipList"`
@@ -2965,17 +2967,23 @@ func (c *Client) GetIPGroup(ctx context.Context, siteID, groupID string) (*IPGro
 // CreateIPGroup creates a new IP group.
 // Endpoint: POST /setting/profiles/groups (v6/ER707 path).
 // The request body uses the v6 wire shape with explicit null envelope fields.
+// The v6/ER707 controller returns the new group ID as a bare string (not an
+// object), so we unmarshal as string first and re-fetch via GetIPGroup —
+// mirroring the CreateMDNSRule/CreateNetwork pattern.
 func (c *Client) CreateIPGroup(ctx context.Context, siteID string, group *IPGroup) (*IPGroup, error) {
 	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPost, "/setting/profiles/groups", group.toWire())
 	if err != nil {
 		return nil, err
 	}
 
-	var created IPGroup
-	if err := json.Unmarshal(resp.Result, &created); err != nil {
-		return nil, fmt.Errorf("decoding created IP group: %w", err)
+	// The API returns the new group ID as a quoted string, not a full object.
+	var groupID string
+	if err := json.Unmarshal(resp.Result, &groupID); err != nil {
+		return nil, fmt.Errorf("decoding created IP group ID: %w", err)
 	}
-	return &created, nil
+
+	// Fetch the full group by listing + filtering.
+	return c.GetIPGroup(ctx, siteID, groupID)
 }
 
 // UpdateIPGroup updates an existing IP group via PUT.
