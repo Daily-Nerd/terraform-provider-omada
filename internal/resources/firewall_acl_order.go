@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -71,10 +72,14 @@ func (r *FirewallACLOrderResource) Schema(_ context.Context, _ resource.SchemaRe
 			},
 			"site_id": siteIDResourceSchema(),
 			"type": schema.Int64Attribute{
-				Description: "ACL type: 0=gateway (default), 1=switch, 2=eap.",
-				Optional:    true,
-				Computed:    true,
-				Default:     int64default.StaticInt64(0),
+				Description: "ACL type: 0=gateway (default), 1=switch, 2=eap. " +
+					"Changing the type replaces the resource — a different ACL type is a distinct ordered set.",
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(0),
+				PlanModifiers: []planmodifier.Int64{
+					int64planmodifier.RequiresReplace(),
+				},
 			},
 			"rule_ids": schema.ListAttribute{
 				Description: "Ordered list of ACL rule IDs. Position in the list sets the " +
@@ -137,21 +142,22 @@ func (r *FirewallACLOrderResource) Read(ctx context.Context, req resource.ReadRe
 	siteID := state.SiteID.ValueString()
 	aclType := int(state.Type.ValueInt64())
 
+	// The set of rule IDs this resource manages. Read must only ever reflect
+	// these IDs back into state — never absorb out-of-band rules that exist
+	// on the controller but are not part of the managed order.
+	var managed []string
+	resp.Diagnostics.Append(state.RuleIDs.ElementsAs(ctx, &managed, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	rules, err := r.client.ListACLRules(ctx, siteID, aclType)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading ACL rules", err.Error())
 		return
 	}
 
-	// Sort by index to reflect the controller's current first-match order.
-	sort.Slice(rules, func(i, j int) bool {
-		return rules[i].Index < rules[j].Index
-	})
-
-	ids := make([]string, len(rules))
-	for i, rule := range rules {
-		ids[i] = rule.ID
-	}
+	ids := orderedManagedIDs(rules, aclType, managed)
 
 	ruleIDs, diags := types.ListValueFrom(ctx, types.StringType, ids)
 	resp.Diagnostics.Append(diags...)
@@ -161,6 +167,42 @@ func (r *FirewallACLOrderResource) Read(ctx context.Context, req resource.ReadRe
 
 	state.RuleIDs = ruleIDs
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// orderedManagedIDs returns the managed rule IDs in the controller's current
+// first-match order. It:
+//   - filters controller rules to the requested aclType (defends against the
+//     controller ever returning mixed types),
+//   - sorts the surviving rules by their .Index,
+//   - keeps only IDs that are present in the managed set (out-of-band rules
+//     are ignored so they are never absorbed into state and reordered),
+//   - drops managed IDs the controller no longer reports (surfaces as drift).
+func orderedManagedIDs(rules []client.ACLRule, aclType int, managed []string) []string {
+	managedSet := make(map[string]struct{}, len(managed))
+	for _, id := range managed {
+		managedSet[id] = struct{}{}
+	}
+
+	filtered := make([]client.ACLRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Type != aclType {
+			continue
+		}
+		if _, ok := managedSet[rule.ID]; !ok {
+			continue
+		}
+		filtered = append(filtered, rule)
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Index < filtered[j].Index
+	})
+
+	ids := make([]string, len(filtered))
+	for i, rule := range filtered {
+		ids[i] = rule.ID
+	}
+	return ids
 }
 
 func (r *FirewallACLOrderResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -176,8 +218,12 @@ func (r *FirewallACLOrderResource) Update(ctx context.Context, req resource.Upda
 		return
 	}
 
-	siteID := state.SiteID.ValueString()
-	aclType := int(state.Type.ValueInt64())
+	// Read siteID/aclType from the PLAN. site_id and type are both
+	// RequiresReplace, so within Update they always match state — but the
+	// plan is the authoritative source of intent and avoids any chance of
+	// targeting the wrong ACL type.
+	siteID := plan.SiteID.ValueString()
+	aclType := int(plan.Type.ValueInt64())
 
 	var ruleIDs []string
 	resp.Diagnostics.Append(plan.RuleIDs.ElementsAs(ctx, &ruleIDs, false)...)
@@ -191,7 +237,6 @@ func (r *FirewallACLOrderResource) Update(ctx context.Context, req resource.Upda
 	}
 
 	plan.ID = state.ID
-	plan.SiteID = state.SiteID
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -221,28 +266,42 @@ func (r *FirewallACLOrderResource) ImportState(ctx context.Context, req resource
 		return
 	}
 
-	// Seed an empty rule_ids list; Read will populate it from the controller.
-	emptyRuleIDs, diags := types.ListValueFrom(ctx, types.StringType, []string{})
+	// Fetch the controller's current rules and adopt their order as the
+	// managed set. On import there is no prior state to filter against, so
+	// every rule of this type becomes managed (the user can prune the list
+	// afterwards). This mirrors firewall_acl.go ImportState: fetch inline,
+	// populate state from the API, and let resp.State.Set persist it.
+	rules, err := r.client.ListACLRules(ctx, siteID, int(aclType))
+	if err != nil {
+		resp.Diagnostics.AddError("Error importing ACL order", err.Error())
+		return
+	}
+
+	filtered := make([]client.ACLRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Type == int(aclType) {
+			filtered = append(filtered, rule)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Index < filtered[j].Index
+	})
+	ids := make([]string, len(filtered))
+	for i, rule := range filtered {
+		ids[i] = rule.ID
+	}
+
+	ruleIDs, diags := types.ListValueFrom(ctx, types.StringType, ids)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	state := FirewallACLOrderModel{
-		ID:      types.StringValue(req.ID),
+		ID:      types.StringValue(fmt.Sprintf("%s:%d", siteID, aclType)),
 		SiteID:  types.StringValue(siteID),
 		Type:    types.Int64Value(aclType),
-		RuleIDs: emptyRuleIDs,
+		RuleIDs: ruleIDs,
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// Delegate to Read to populate rule_ids from the controller.
-	readReq := resource.ReadRequest{State: resp.State}
-	readResp := resource.ReadResponse{State: resp.State}
-	r.Read(ctx, readReq, &readResp)
-	resp.Diagnostics.Append(readResp.Diagnostics...)
-	resp.State = readResp.State
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
@@ -296,5 +297,188 @@ func TestFirewallACLOrder_Read_SortsRulesByIndex(t *testing.T) {
 
 	if !reflect.DeepEqual(gotIDs, wantIDs) {
 		t.Errorf("Read rule_ids = %v, want %v (sorted by index)", gotIDs, wantIDs)
+	}
+}
+
+// TestFirewallACLOrder_Read_ExcludesOutOfBandRules verifies that Read only ever
+// reflects the managed rule IDs (those already in state.rule_ids) and never
+// absorbs out-of-band rules that exist on the controller but are not managed.
+//
+// Regression contract: if Read reverts to setting rule_ids to ALL controller
+// rules, OUTSIDER would leak into state and the next apply would reorder it —
+// destructive.
+func TestFirewallACLOrder_Read_ExcludesOutOfBandRules(t *testing.T) {
+	siteID := "site-oob"
+
+	// Controller reports four rules sorted by index: a, b, OUTSIDER, c.
+	// OUTSIDER is not in the managed set and must be excluded.
+	storedRules := []client.ACLRule{
+		{ID: "managed-a", Index: 1},
+		{ID: "managed-b", Index: 2},
+		{ID: "OUTSIDER", Index: 3},
+		{ID: "managed-c", Index: 4},
+	}
+
+	var modifyHits int
+	var lastModifyBody map[string]int
+
+	server := mockACLOrderServer(t, siteID, storedRules, &modifyHits, &lastModifyBody)
+	defer server.Close()
+
+	c, err := client.NewClient(server.URL, "admin", "password", true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	r := &FirewallACLOrderResource{client: c}
+
+	ctx := context.Background()
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+
+	// Seed state with only the managed IDs (OUTSIDER absent).
+	attrTypes := aclOrderSchemaAttrTypes()
+	managedVals := []tftypes.Value{
+		tftypes.NewValue(tftypes.String, "managed-a"),
+		tftypes.NewValue(tftypes.String, "managed-b"),
+		tftypes.NewValue(tftypes.String, "managed-c"),
+	}
+	stateRaw := tftypes.NewValue(tftypes.Object{AttributeTypes: attrTypes}, map[string]tftypes.Value{
+		"id":       tftypes.NewValue(tftypes.String, fmt.Sprintf("%s:0", siteID)),
+		"site_id":  tftypes.NewValue(tftypes.String, siteID),
+		"type":     tftypes.NewValue(tftypes.Number, new(big.Float).SetInt64(0)),
+		"rule_ids": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, managedVals),
+	})
+
+	readReq := resource.ReadRequest{
+		State: tfsdk.State{Schema: schemaResp.Schema, Raw: stateRaw},
+	}
+	readResp := resource.ReadResponse{
+		State: tfsdk.State{Schema: schemaResp.Schema, Raw: stateRaw},
+	}
+
+	r.Read(ctx, readReq, &readResp)
+
+	if readResp.Diagnostics.HasError() {
+		t.Fatalf("Read returned errors: %v", readResp.Diagnostics)
+	}
+
+	var state FirewallACLOrderModel
+	readResp.State.Get(ctx, &state)
+
+	var gotIDs []string
+	state.RuleIDs.ElementsAs(ctx, &gotIDs, false)
+
+	wantIDs := []string{"managed-a", "managed-b", "managed-c"}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Errorf("Read rule_ids = %v, want %v (OUTSIDER must be excluded)", gotIDs, wantIDs)
+	}
+}
+
+// TestFirewallACLOrder_Read_DropsMissingManagedRule verifies that a managed
+// rule the controller no longer reports drops out of rule_ids (surfacing as
+// drift on the next plan).
+func TestFirewallACLOrder_Read_DropsMissingManagedRule(t *testing.T) {
+	siteID := "site-drop"
+
+	// managed-b is gone from the controller.
+	storedRules := []client.ACLRule{
+		{ID: "managed-a", Index: 1},
+		{ID: "managed-c", Index: 2},
+	}
+
+	var modifyHits int
+	var lastModifyBody map[string]int
+
+	server := mockACLOrderServer(t, siteID, storedRules, &modifyHits, &lastModifyBody)
+	defer server.Close()
+
+	c, err := client.NewClient(server.URL, "admin", "password", true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	r := &FirewallACLOrderResource{client: c}
+
+	ctx := context.Background()
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+
+	attrTypes := aclOrderSchemaAttrTypes()
+	managedVals := []tftypes.Value{
+		tftypes.NewValue(tftypes.String, "managed-a"),
+		tftypes.NewValue(tftypes.String, "managed-b"),
+		tftypes.NewValue(tftypes.String, "managed-c"),
+	}
+	stateRaw := tftypes.NewValue(tftypes.Object{AttributeTypes: attrTypes}, map[string]tftypes.Value{
+		"id":       tftypes.NewValue(tftypes.String, fmt.Sprintf("%s:0", siteID)),
+		"site_id":  tftypes.NewValue(tftypes.String, siteID),
+		"type":     tftypes.NewValue(tftypes.Number, new(big.Float).SetInt64(0)),
+		"rule_ids": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, managedVals),
+	})
+
+	readResp := resource.ReadResponse{
+		State: tfsdk.State{Schema: schemaResp.Schema, Raw: stateRaw},
+	}
+	r.Read(ctx, resource.ReadRequest{State: tfsdk.State{Schema: schemaResp.Schema, Raw: stateRaw}}, &readResp)
+
+	if readResp.Diagnostics.HasError() {
+		t.Fatalf("Read returned errors: %v", readResp.Diagnostics)
+	}
+
+	var state FirewallACLOrderModel
+	readResp.State.Get(ctx, &state)
+	var gotIDs []string
+	state.RuleIDs.ElementsAs(ctx, &gotIDs, false)
+
+	wantIDs := []string{"managed-a", "managed-c"}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Errorf("Read rule_ids = %v, want %v (missing managed-b must drop out)", gotIDs, wantIDs)
+	}
+}
+
+// TestFirewallACLOrder_OrderedManagedIDs_FiltersByType verifies that the
+// orderedManagedIDs helper drops rules of a different ACL type even when their
+// ID is in the managed set (defensive guard against controller type pollution).
+func TestFirewallACLOrder_OrderedManagedIDs_FiltersByType(t *testing.T) {
+	rules := []client.ACLRule{
+		{ID: "gw-a", Type: 0, Index: 2},
+		{ID: "sw-x", Type: 1, Index: 1}, // wrong type, must be excluded
+		{ID: "gw-b", Type: 0, Index: 1},
+	}
+	managed := []string{"gw-a", "gw-b", "sw-x"}
+
+	got := orderedManagedIDs(rules, 0, managed)
+	want := []string{"gw-b", "gw-a"} // type 0 only, sorted by index
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("orderedManagedIDs = %v, want %v (type-1 rule must be excluded)", got, want)
+	}
+}
+
+// TestFirewallACLOrder_Schema_TypeRequiresReplace verifies the type attribute
+// is marked RequiresReplace so a type change replaces the resource instead of
+// reordering the wrong ACL type in place.
+func TestFirewallACLOrder_Schema_TypeRequiresReplace(t *testing.T) {
+	r := NewFirewallACLOrderResource()
+	sp, ok := r.(interface {
+		Schema(context.Context, resource.SchemaRequest, *resource.SchemaResponse)
+	})
+	if !ok {
+		t.Fatal("resource does not implement Schema")
+	}
+
+	var schemaResp resource.SchemaResponse
+	sp.Schema(context.Background(), resource.SchemaRequest{}, &schemaResp)
+
+	attr, ok := schemaResp.Schema.Attributes["type"]
+	if !ok {
+		t.Fatal("type attribute missing from schema")
+	}
+	int64Attr, ok := attr.(schema.Int64Attribute)
+	if !ok {
+		t.Fatalf("type attribute is not Int64Attribute, got %T", attr)
+	}
+	if len(int64Attr.PlanModifiers) == 0 {
+		t.Fatal("type attribute has no plan modifiers — expected RequiresReplace")
 	}
 }
