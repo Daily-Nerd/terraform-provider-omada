@@ -2142,6 +2142,7 @@ func TestACLRule_FullBodyMarshal(t *testing.T) {
 	got := string(data)
 
 	checks := []string{
+		`"protocols":[256]`,
 		`"direction":{"wanInIds":[],"vpnInIds":[],"lanToWan":false,"lanToLan":true}`,
 		`"customAclOsws":[]`,
 		`"customAclStacks":[]`,

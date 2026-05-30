@@ -41,20 +41,20 @@ func TestACLRule_Create_SendsEmptyCustomArrays(t *testing.T) {
 		t.Fatal("buildACLRuleFromPlan returned nil")
 	}
 
-	if got.CustomAclOsws == nil {
-		t.Error("CustomAclOsws must be non-nil (serialize as [])")
+	if got.CustomAclOsws == nil || len(got.CustomAclOsws) != 0 {
+		t.Errorf("CustomAclOsws must be an empty non-nil slice (serialize as []), got %#v", got.CustomAclOsws)
 	}
-	if got.CustomAclStacks == nil {
-		t.Error("CustomAclStacks must be non-nil (serialize as [])")
+	if got.CustomAclStacks == nil || len(got.CustomAclStacks) != 0 {
+		t.Errorf("CustomAclStacks must be an empty non-nil slice (serialize as []), got %#v", got.CustomAclStacks)
 	}
-	if got.CustomAclDevices == nil {
-		t.Error("CustomAclDevices must be non-nil (serialize as [])")
+	if got.CustomAclDevices == nil || len(got.CustomAclDevices) != 0 {
+		t.Errorf("CustomAclDevices must be an empty non-nil slice (serialize as []), got %#v", got.CustomAclDevices)
 	}
-	if got.Direction.WanInIDs == nil {
-		t.Error("Direction.WanInIDs must be non-nil (serialize as [])")
+	if got.Direction.WanInIDs == nil || len(got.Direction.WanInIDs) != 0 {
+		t.Errorf("Direction.WanInIDs must be an empty non-nil slice (serialize as []), got %#v", got.Direction.WanInIDs)
 	}
-	if got.Direction.VpnInIDs == nil {
-		t.Error("Direction.VpnInIDs must be non-nil (serialize as [])")
+	if got.Direction.VpnInIDs == nil || len(got.Direction.VpnInIDs) != 0 {
+		t.Errorf("Direction.VpnInIDs must be an empty non-nil slice (serialize as []), got %#v", got.Direction.VpnInIDs)
 	}
 	if !got.Direction.LanToLan {
 		t.Error("Direction.LanToLan should be true")
