@@ -2736,7 +2736,15 @@ type ACLRule struct {
 
 // normalizeACLRule ensures nil slices that must serialize as [] are initialized
 // to empty (non-nil) slices before marshaling.
+// SourceIDs / DestinationIDs must be [] (not null) even for "any" rules;
+// the controller rejects null with -33609 "Choose the source and destination".
 func normalizeACLRule(rule *ACLRule) {
+	if rule.SourceIDs == nil {
+		rule.SourceIDs = []string{}
+	}
+	if rule.DestinationIDs == nil {
+		rule.DestinationIDs = []string{}
+	}
 	if rule.CustomAclOsws == nil {
 		rule.CustomAclOsws = []string{}
 	}

@@ -975,6 +975,78 @@ func TestDeleteACLRule(t *testing.T) {
 }
 
 // =============================================================================
+// ACL Rule nil-IDs serialization tests
+// =============================================================================
+
+// TestACLRule_NilSourceDestIds_MarshalAsEmptyArray verifies that an ACLRule with
+// nil SourceIDs / DestinationIDs (the "any" source/destination case) serializes
+// both fields as [] rather than null. The Omada controller rejects null with
+// -33609 "Choose the source and destination".
+//
+// RED: current normalizeACLRule does NOT initialize SourceIDs / DestinationIDs,
+// so json.Marshal produces "sourceIds":null which the controller rejects.
+func TestACLRule_NilSourceDestIds_MarshalAsEmptyArray(t *testing.T) {
+	rule := &ACLRule{
+		Name:            "Allow Any to Any",
+		Type:            0,
+		Status:          true,
+		Policy:          1,
+		Protocols:       []int{256},
+		SourceType:      0,
+		SourceIDs:       nil, // "any" — nil slice
+		DestinationType: 0,
+		DestinationIDs:  nil, // "any" — nil slice
+	}
+
+	normalizeACLRule(rule)
+
+	data, err := json.Marshal(rule)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	body := string(data)
+
+	// nil slice must produce [] not null
+	if !strings.Contains(body, `"sourceIds":[]`) {
+		t.Errorf("want sourceIds:[] in JSON, got: %s", body)
+	}
+	if !strings.Contains(body, `"destinationIds":[]`) {
+		t.Errorf("want destinationIds:[] in JSON, got: %s", body)
+	}
+}
+
+// TestACLRule_PopulatedIds_Preserved verifies that non-nil (populated) IDs still
+// serialize correctly after normalization.
+func TestACLRule_PopulatedIds_Preserved(t *testing.T) {
+	rule := &ACLRule{
+		Name:            "Block IoT to WAN",
+		Type:            0,
+		Status:          true,
+		Policy:          0,
+		Protocols:       []int{6},
+		SourceType:      0,
+		SourceIDs:       []string{"net-iot"},
+		DestinationType: 2,
+		DestinationIDs:  []string{"ipg-internet"},
+	}
+
+	normalizeACLRule(rule)
+
+	data, err := json.Marshal(rule)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	body := string(data)
+
+	if !strings.Contains(body, `"sourceIds":["net-iot"]`) {
+		t.Errorf("want sourceIds:[net-iot] in JSON, got: %s", body)
+	}
+	if !strings.Contains(body, `"destinationIds":["ipg-internet"]`) {
+		t.Errorf("want destinationIds:[ipg-internet] in JSON, got: %s", body)
+	}
+}
+
+// =============================================================================
 // IP Groups Tests
 // =============================================================================
 
