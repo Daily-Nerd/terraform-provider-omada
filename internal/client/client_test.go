@@ -891,8 +891,9 @@ func TestUpdateACLRule(t *testing.T) {
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
 		"/sites/site-1/setting/firewall/acls/acl-1": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPatch {
-				t.Errorf("expected PATCH, got %s", r.Method)
+			// ACL update must use PUT (PATCH returns -1600 on v6 controllers)
+			if r.Method != http.MethodPut {
+				t.Errorf("expected PUT, got %s", r.Method)
 			}
 			json.NewEncoder(w).Encode(APIResponse{
 				ErrorCode: 0,
@@ -921,7 +922,8 @@ func TestUpdateACLRule_EmptyResult(t *testing.T) {
 
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
 		"/sites/site-1/setting/firewall/acls/acl-1": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPatch {
+			// ACL update must use PUT (PATCH returns -1600 on v6 controllers)
+			if r.Method == http.MethodPut {
 				json.NewEncoder(w).Encode(APIResponse{
 					ErrorCode: 0,
 					Result:    json.RawMessage(`{}`),
@@ -2101,5 +2103,154 @@ func TestUpdateSwitchPortV2_VlanDerivation_ExplicitNativePreserved(t *testing.T)
 	}
 	if capturedBody.ProfileVlanOverrideEnable {
 		t.Error("ProfileVlanOverrideEnable should be false when user supplied explicit native (no derivation)")
+	}
+}
+
+// =============================================================================
+// Firewall ACL Tests
+// =============================================================================
+
+// TestACLRule_FullBodyMarshal verifies that ACLRule marshals the full
+// controller body shape: direction arrays always serialize as [] (never
+// omitted), and custom-ACL slices are present.
+func TestACLRule_FullBodyMarshal(t *testing.T) {
+	rule := ACLRule{
+		Name:            "test-rule",
+		Status:          true,
+		Policy:          1,
+		Type:            0,
+		Protocols:       []int{256},
+		SourceType:      0,
+		SourceIDs:       []string{},
+		DestinationType: 0,
+		DestinationIDs:  []string{},
+		Direction: ACLDirection{
+			LanToWan: false,
+			LanToLan: true,
+			WanInIDs: []string{},
+			VpnInIDs: []string{},
+		},
+		CustomAclOsws:    []string{},
+		CustomAclStacks:  []string{},
+		CustomAclDevices: []string{},
+	}
+
+	data, err := json.Marshal(rule)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	got := string(data)
+
+	checks := []string{
+		`"direction":{"wanInIds":[],"vpnInIds":[],"lanToWan":false,"lanToLan":true}`,
+		`"customAclOsws":[]`,
+		`"customAclStacks":[]`,
+		`"customAclDevices":[]`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("JSON missing %q\ngot: %s", want, got)
+		}
+	}
+}
+
+// TestUpdateACLRule_UsesPUT verifies that UpdateACLRule sends PUT (not PATCH).
+func TestUpdateACLRule_UsesPUT(t *testing.T) {
+	const siteID = "site-1"
+	const ruleID = "rule-abc"
+	capturedMethod := ""
+
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		fmt.Sprintf("/sites/%s/setting/firewall/acls/%s", siteID, ruleID): func(w http.ResponseWriter, r *http.Request) {
+			capturedMethod = r.Method
+			if r.Method != http.MethodPut {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result: mustMarshal(t, ACLRule{
+					ID:     ruleID,
+					Name:   "test-rule",
+					Status: true,
+					Policy: 1,
+					Type:   0,
+				}),
+			})
+		},
+	})
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	rule := &ACLRule{
+		Name:             "test-rule",
+		Status:           true,
+		Policy:           1,
+		Type:             0,
+		Protocols:        []int{256},
+		SourceIDs:        []string{},
+		DestinationIDs:   []string{},
+		CustomAclOsws:    []string{},
+		CustomAclStacks:  []string{},
+		CustomAclDevices: []string{},
+		Direction: ACLDirection{
+			WanInIDs: []string{},
+			VpnInIDs: []string{},
+		},
+	}
+
+	_, err := c.UpdateACLRule(context.Background(), siteID, ruleID, rule)
+	if err != nil {
+		t.Fatalf("UpdateACLRule: %v", err)
+	}
+	if capturedMethod != http.MethodPut {
+		t.Errorf("UpdateACLRule used method %q, want PUT", capturedMethod)
+	}
+}
+
+// TestModifyACLIndex verifies the ModifyACLIndex client method sends the
+// correct POST to /cmd/acls/modifyIndex with the expected body shape.
+func TestModifyACLIndex(t *testing.T) {
+	const siteID = "site-1"
+
+	type modifyIndexBody struct {
+		Indexes map[string]int `json:"indexes"`
+		Type    int            `json:"type"`
+	}
+
+	var capturedBody modifyIndexBody
+	capturedPath := ""
+
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		fmt.Sprintf("/sites/%s/cmd/acls/modifyIndex", siteID): func(w http.ResponseWriter, r *http.Request) {
+			capturedPath = r.URL.Path
+			if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+				http.Error(w, "bad body", http.StatusBadRequest)
+				return
+			}
+			json.NewEncoder(w).Encode(APIResponse{ErrorCode: 0})
+		},
+	})
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	indexes := map[string]int{"id-a": 1, "id-b": 2}
+	if err := c.ModifyACLIndex(context.Background(), siteID, 0, indexes); err != nil {
+		t.Fatalf("ModifyACLIndex: %v", err)
+	}
+
+	omadacID := "test-omadac-id"
+	wantPath := fmt.Sprintf("/%s/api/v2/sites/%s/cmd/acls/modifyIndex", omadacID, siteID)
+	if capturedPath != wantPath {
+		t.Errorf("path = %q, want %q", capturedPath, wantPath)
+	}
+	if capturedBody.Type != 0 {
+		t.Errorf("type = %d, want 0", capturedBody.Type)
+	}
+	if capturedBody.Indexes["id-a"] != 1 {
+		t.Errorf("indexes[id-a] = %d, want 1", capturedBody.Indexes["id-a"])
+	}
+	if capturedBody.Indexes["id-b"] != 2 {
+		t.Errorf("indexes[id-b] = %d, want 2", capturedBody.Indexes["id-b"])
 	}
 }

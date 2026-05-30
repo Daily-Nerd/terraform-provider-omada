@@ -2692,32 +2692,59 @@ func (c *Client) UpdateSwitchServiceConfig(ctx context.Context, siteID, mac stri
 // --- Firewall ACL Rules ---
 
 // ACLDirection specifies which traffic directions an ACL applies to.
+// WanInIDs and VpnInIDs must serialize as [] (never omitted) to satisfy the
+// controller's schema validation.
 type ACLDirection struct {
+	WanInIDs []string `json:"wanInIds"`
+	VpnInIDs []string `json:"vpnInIds"`
 	LanToWan bool     `json:"lanToWan"`
 	LanToLan bool     `json:"lanToLan"`
-	WanInIDs []string `json:"wanInIds,omitempty"`
-	VpnInIDs []string `json:"vpnInIds,omitempty"`
 }
 
 // ACLRule represents a firewall ACL rule.
+// CustomAclOsws, CustomAclStacks, and CustomAclDevices must serialize as []
+// (never omitted) to satisfy the controller's schema validation.
 type ACLRule struct {
-	ID              string       `json:"id,omitempty"`
-	Name            string       `json:"name"`
-	Type            int          `json:"type"`            // 0=gateway, 1=switch, 2=eap
-	Index           int          `json:"index,omitempty"` // rule ordering (first-match-wins)
-	Status          bool         `json:"status"`          // enabled/disabled
-	Policy          int          `json:"policy"`          // 0=deny, 1=permit
-	Protocols       []int        `json:"protocols"`       // 6=TCP, 17=UDP, 1=ICMP, etc.
-	SourceType      int          `json:"sourceType"`      // 0=network, 2=ip_group
-	SourceIDs       []string     `json:"sourceIds"`
-	DestinationType int          `json:"destinationType"` // 0=network, 2=ip_group
-	DestinationIDs  []string     `json:"destinationIds"`
-	Direction       ACLDirection `json:"direction"`
-	StateMode       int          `json:"stateMode,omitempty"` // 0=auto (stateful)
-	BiDirectional   bool         `json:"biDirectional,omitempty"`
-	IPSec           int          `json:"ipSec,omitempty"`
-	Syslog          bool         `json:"syslog,omitempty"`
-	Resource        int          `json:"resource,omitempty"`
+	ID               string       `json:"id,omitempty"`
+	Name             string       `json:"name"`
+	Type             int          `json:"type"`            // 0=gateway, 1=switch, 2=eap
+	Index            int          `json:"index,omitempty"` // rule ordering (first-match-wins)
+	Status           bool         `json:"status"`          // enabled/disabled
+	Policy           int          `json:"policy"`          // 0=deny, 1=permit
+	Protocols        []int        `json:"protocols"`       // 6=TCP, 17=UDP, 1=ICMP, 256=any
+	SourceType       int          `json:"sourceType"`      // 0=network, 2=ip_group
+	SourceIDs        []string     `json:"sourceIds"`
+	DestinationType  int          `json:"destinationType"` // 0=network, 2=ip_group
+	DestinationIDs   []string     `json:"destinationIds"`
+	Direction        ACLDirection `json:"direction"`
+	StateMode        int          `json:"stateMode,omitempty"` // 0=auto (stateful)
+	BiDirectional    bool         `json:"biDirectional,omitempty"`
+	IPSec            int          `json:"ipSec,omitempty"`
+	Syslog           bool         `json:"syslog,omitempty"`
+	Resource         int          `json:"resource,omitempty"`
+	CustomAclOsws    []string     `json:"customAclOsws"`
+	CustomAclStacks  []string     `json:"customAclStacks"`
+	CustomAclDevices []string     `json:"customAclDevices"`
+}
+
+// normalizeACLRule ensures nil slices that must serialize as [] are initialized
+// to empty (non-nil) slices before marshaling.
+func normalizeACLRule(rule *ACLRule) {
+	if rule.CustomAclOsws == nil {
+		rule.CustomAclOsws = []string{}
+	}
+	if rule.CustomAclStacks == nil {
+		rule.CustomAclStacks = []string{}
+	}
+	if rule.CustomAclDevices == nil {
+		rule.CustomAclDevices = []string{}
+	}
+	if rule.Direction.WanInIDs == nil {
+		rule.Direction.WanInIDs = []string{}
+	}
+	if rule.Direction.VpnInIDs == nil {
+		rule.Direction.VpnInIDs = []string{}
+	}
 }
 
 // ACLListResult wraps the paginated ACL list response with metadata.
@@ -2771,6 +2798,7 @@ func (c *Client) GetACLRule(ctx context.Context, siteID, ruleID string, aclType 
 
 // CreateACLRule creates a new ACL rule.
 func (c *Client) CreateACLRule(ctx context.Context, siteID string, rule *ACLRule) (*ACLRule, error) {
+	normalizeACLRule(rule)
 	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPost, "/setting/firewall/acls", rule)
 	if err != nil {
 		return nil, err
@@ -2783,9 +2811,12 @@ func (c *Client) CreateACLRule(ctx context.Context, siteID string, rule *ACLRule
 	return &created, nil
 }
 
-// UpdateACLRule updates an existing ACL rule.
+// UpdateACLRule updates an existing ACL rule via PUT.
+// The v6/ER707 controller returns -1600 ("Unsupported request path") for PATCH
+// on ACL endpoints; PUT is the correct verb per the UI-observed API contract.
 func (c *Client) UpdateACLRule(ctx context.Context, siteID, ruleID string, rule *ACLRule) (*ACLRule, error) {
-	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPatch, fmt.Sprintf("/setting/firewall/acls/%s", ruleID), rule)
+	normalizeACLRule(rule)
+	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPut, fmt.Sprintf("/setting/firewall/acls/%s", ruleID), rule)
 	if err != nil {
 		return nil, err
 	}
@@ -2802,6 +2833,21 @@ func (c *Client) UpdateACLRule(ctx context.Context, siteID, ruleID string, rule 
 // DeleteACLRule deletes an ACL rule.
 func (c *Client) DeleteACLRule(ctx context.Context, siteID, ruleID string) error {
 	_, err := c.doSiteRequest(ctx, siteID, http.MethodDelete, fmt.Sprintf("/setting/firewall/acls/%s", ruleID), nil)
+	return err
+}
+
+// ModifyACLIndex reorders ACL rules by submitting a map of rule-ID → position
+// index. aclType: 0=gateway, 1=switch, 2=eap.
+// Endpoint: POST /api/v2/sites/{site}/cmd/acls/modifyIndex
+func (c *Client) ModifyACLIndex(ctx context.Context, siteID string, aclType int, indexes map[string]int) error {
+	body := struct {
+		Indexes map[string]int `json:"indexes"`
+		Type    int            `json:"type"`
+	}{
+		Indexes: indexes,
+		Type:    aclType,
+	}
+	_, err := c.doSiteRequest(ctx, siteID, http.MethodPost, "/cmd/acls/modifyIndex", body)
 	return err
 }
 
