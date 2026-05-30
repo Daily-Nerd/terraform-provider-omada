@@ -38,6 +38,7 @@ type ACLRuleResourceModel struct {
 	DestinationIDs  types.List   `tfsdk:"destination_ids"`
 	LanToWan        types.Bool   `tfsdk:"lan_to_wan"`
 	LanToLan        types.Bool   `tfsdk:"lan_to_lan"`
+	WanInIDs        types.List   `tfsdk:"wan_in_ids"`
 	BiDirectional   types.Bool   `tfsdk:"bi_directional"`
 	Index           types.Int64  `tfsdk:"index"`
 }
@@ -88,7 +89,7 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				ElementType: types.Int64Type,
 			},
 			"source_type": schema.Int64Attribute{
-				Description: "Source type: 0=network, 2=ip_group.",
+				Description: "Source type: 0=network, 1=ip_group.",
 				Optional:    true,
 				Computed:    true,
 				Default:     int64default.StaticInt64(0),
@@ -99,7 +100,7 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				ElementType: types.StringType,
 			},
 			"destination_type": schema.Int64Attribute{
-				Description: "Destination type: 0=network, 2=ip_group.",
+				Description: "Destination type: 0=network, 1=ip_group.",
 				Optional:    true,
 				Computed:    true,
 				Default:     int64default.StaticInt64(0),
@@ -120,6 +121,12 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional:    true,
 				Computed:    true,
 				Default:     booldefault.StaticBool(true),
+			},
+			"wan_in_ids": schema.ListAttribute{
+				Description: "WAN interface UUIDs for LAN-to-WAN direction (from omada_gateway_ports data source). Required by the controller when lan_to_wan is true.",
+				Optional:    true,
+				Computed:    true,
+				ElementType: types.StringType,
 			},
 			"bi_directional": schema.BoolAttribute{
 				Description: "Whether this rule applies in both directions.",
@@ -180,6 +187,19 @@ func buildACLRuleFromPlan(ctx context.Context, plan *ACLRuleResourceModel, errs 
 		return nil
 	}
 
+	var wanInIDs []string
+	if !plan.WanInIDs.IsNull() && !plan.WanInIDs.IsUnknown() {
+		if diags := plan.WanInIDs.ElementsAs(ctx, &wanInIDs, false); diags.HasError() {
+			for _, d := range diags {
+				*errs = append(*errs, fmt.Errorf("%s: %s", d.Summary(), d.Detail()))
+			}
+			return nil
+		}
+	}
+	if wanInIDs == nil {
+		wanInIDs = []string{}
+	}
+
 	return &client.ACLRule{
 		Name:            plan.Name.ValueString(),
 		Type:            int(plan.Type.ValueInt64()),
@@ -194,7 +214,7 @@ func buildACLRuleFromPlan(ctx context.Context, plan *ACLRuleResourceModel, errs 
 		Direction: client.ACLDirection{
 			LanToWan: plan.LanToWan.ValueBool(),
 			LanToLan: plan.LanToLan.ValueBool(),
-			WanInIDs: []string{},
+			WanInIDs: wanInIDs,
 			VpnInIDs: []string{},
 		},
 		CustomAclOsws:    []string{},
@@ -366,4 +386,7 @@ func (r *ACLRuleResource) setStateFromAPI(ctx context.Context, model *ACLRuleRes
 
 	destIDs, _ := types.ListValueFrom(ctx, types.StringType, rule.DestinationIDs)
 	model.DestinationIDs = destIDs
+
+	wanInIDs, _ := types.ListValueFrom(ctx, types.StringType, rule.Direction.WanInIDs)
+	model.WanInIDs = wanInIDs
 }

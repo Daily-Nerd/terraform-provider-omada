@@ -2719,9 +2719,9 @@ type ACLRule struct {
 	Status           bool         `json:"status"`          // enabled/disabled
 	Policy           int          `json:"policy"`          // 0=deny, 1=permit
 	Protocols        []int        `json:"protocols"`       // 6=TCP, 17=UDP, 1=ICMP, 256=any
-	SourceType       int          `json:"sourceType"`      // 0=network, 2=ip_group
+	SourceType       int          `json:"sourceType"`      // 0=network, 1=ip_group
 	SourceIDs        []string     `json:"sourceIds"`
-	DestinationType  int          `json:"destinationType"` // 0=network, 2=ip_group
+	DestinationType  int          `json:"destinationType"` // 0=network, 1=ip_group
 	DestinationIDs   []string     `json:"destinationIds"`
 	Direction        ACLDirection `json:"direction"`
 	StateMode        int          `json:"stateMode,omitempty"` // 0=auto (stateful)
