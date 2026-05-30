@@ -974,6 +974,121 @@ func TestDeleteACLRule(t *testing.T) {
 	}
 }
 
+// TestCreateACLRule_EmptyResult verifies that CreateACLRule handles a controller
+// response where result is empty/null (the live bug: "unexpected end of JSON input").
+// The impl should fall back to a list-then-match-by-id strategy using the rule
+// returned by the follow-up GET (ListACLRules).
+func TestCreateACLRule_EmptyResult(t *testing.T) {
+	fullRule := ACLRule{
+		ID: "acl-created", Name: "tf_block_iot", Type: 0, Status: true,
+		Policy: 0, Protocols: []int{6, 17},
+		SourceIDs: []string{"net-1"}, DestinationIDs: []string{"net-2"},
+		CustomAclOsws: []string{}, CustomAclStacks: []string{}, CustomAclDevices: []string{},
+	}
+	listResult := ACLListResult{TotalRows: 1, CurrentPage: 1, CurrentSize: 100, Data: []ACLRule{fullRule}}
+
+	listCallCount := 0
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites/site-1/setting/firewall/acls": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodPost:
+				// Controller returns empty result (the live bug trigger).
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Msg:       "Success.",
+					Result:    json.RawMessage(`""`),
+				})
+			case http.MethodGet:
+				listCallCount++
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, listResult),
+				})
+			default:
+				t.Errorf("unexpected method %s", r.Method)
+			}
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	input := &ACLRule{
+		Name: "tf_block_iot", Type: 0, Status: true, Policy: 0,
+		Protocols: []int{6, 17},
+		SourceIDs: []string{"net-1"}, DestinationIDs: []string{"net-2"},
+	}
+	got, err := c.CreateACLRule(context.Background(), "site-1", input)
+	if err != nil {
+		t.Fatalf("CreateACLRule (empty result): %v", err)
+	}
+	if got.ID != "acl-created" {
+		t.Errorf("ID = %q, want %q", got.ID, "acl-created")
+	}
+	if got.Name != "tf_block_iot" {
+		t.Errorf("Name = %q, want %q", got.Name, "tf_block_iot")
+	}
+	if listCallCount == 0 {
+		t.Error("expected at least one GET list call to re-fetch after empty create; got 0")
+	}
+}
+
+// TestCreateACLRule_StringIDResult verifies that CreateACLRule handles a controller
+// response where result is a bare quoted string ID (like CreateIPGroup).
+// The impl should follow up with GetACLRule (list+match) and return the full rule.
+func TestCreateACLRule_StringIDResult(t *testing.T) {
+	createdID := "64a1b2c3d4e5f6a7b8c9d0e1"
+	fullRule := ACLRule{
+		ID: createdID, Name: "tf_allow_dns", Type: 0, Status: true,
+		Policy: 1, Protocols: []int{17},
+		SourceIDs: []string{"net-1"}, DestinationIDs: []string{"ipg-1"},
+		CustomAclOsws: []string{}, CustomAclStacks: []string{}, CustomAclDevices: []string{},
+	}
+	listResult := ACLListResult{TotalRows: 1, CurrentPage: 1, CurrentSize: 100, Data: []ACLRule{fullRule}}
+
+	listCallCount := 0
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		"/sites/site-1/setting/firewall/acls": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodPost:
+				// Controller returns bare string ID.
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    json.RawMessage(`"` + createdID + `"`),
+				})
+			case http.MethodGet:
+				listCallCount++
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, listResult),
+				})
+			default:
+				t.Errorf("unexpected method %s", r.Method)
+			}
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	input := &ACLRule{
+		Name: "tf_allow_dns", Type: 0, Status: true, Policy: 1,
+		Protocols: []int{17},
+		SourceIDs: []string{"net-1"}, DestinationIDs: []string{"ipg-1"},
+	}
+	got, err := c.CreateACLRule(context.Background(), "site-1", input)
+	if err != nil {
+		t.Fatalf("CreateACLRule (string-id result): %v", err)
+	}
+	if got.ID != createdID {
+		t.Errorf("ID = %q, want %q", got.ID, createdID)
+	}
+	if got.Name != "tf_allow_dns" {
+		t.Errorf("Name = %q, want %q", got.Name, "tf_allow_dns")
+	}
+	if listCallCount == 0 {
+		t.Error("expected at least one GET list call to re-fetch after string-id create; got 0")
+	}
+}
+
 // =============================================================================
 // ACL Rule nil-IDs serialization tests
 // =============================================================================

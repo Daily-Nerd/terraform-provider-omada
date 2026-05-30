@@ -2812,6 +2812,14 @@ func (c *Client) GetACLRule(ctx context.Context, siteID, ruleID string, aclType 
 }
 
 // CreateACLRule creates a new ACL rule.
+// The Omada controller response varies by version:
+//   - v6.x live: bare string ID (or empty string) — not a full ACLRule object.
+//   - Some versions: full ACLRule object.
+//
+// Strategy (mirrors CreateIPGroup):
+//  1. Empty result → list all rules and match by name.
+//  2. String ID    → GetACLRule (list+match by id) to return the full rule.
+//  3. Full object  → return it directly (legacy/future-proof path).
 func (c *Client) CreateACLRule(ctx context.Context, siteID string, rule *ACLRule) (*ACLRule, error) {
 	normalizeACLRule(rule)
 	resp, err := c.doSiteRequest(ctx, siteID, http.MethodPost, "/setting/firewall/acls", rule)
@@ -2819,6 +2827,29 @@ func (c *Client) CreateACLRule(ctx context.Context, siteID string, rule *ACLRule
 		return nil, err
 	}
 
+	// Empty result path: controller returned no id.
+	// List all rules of this type and match by name.
+	if isEmptyResult(resp.Result) {
+		rules, err := c.ListACLRules(ctx, siteID, rule.Type)
+		if err != nil {
+			return nil, fmt.Errorf("listing ACL rules after create (no id in response): %w", err)
+		}
+		for i := range rules {
+			if rules[i].Name == rule.Name {
+				return &rules[i], nil
+			}
+		}
+		return nil, fmt.Errorf("ACL rule %q not found after create", rule.Name)
+	}
+
+	// Try to unmarshal result as a string ID (the live v6 API response shape).
+	var ruleID string
+	if err := json.Unmarshal(resp.Result, &ruleID); err == nil && ruleID != "" {
+		// String-id path: fetch the full rule by id (list + match).
+		return c.GetACLRule(ctx, siteID, ruleID, rule.Type)
+	}
+
+	// Full-object path: controller returned a complete ACLRule (legacy/future).
 	var created ACLRule
 	if err := json.Unmarshal(resp.Result, &created); err != nil {
 		return nil, fmt.Errorf("decoding created ACL rule: %w", err)
