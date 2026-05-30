@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -34,17 +35,18 @@ type SwitchPortResourceModel struct {
 	DeviceMAC types.String `tfsdk:"device_mac"`
 	Port      types.Int64  `tfsdk:"port"`
 
-	Name                  types.String `tfsdk:"name"`
-	Disable               types.Bool   `tfsdk:"disable"`
-	ProfileID             types.String `tfsdk:"profile_id"`
-	ProfileOverrideEnable types.Bool   `tfsdk:"profile_override_enable"`
-	NativeNetworkID       types.String `tfsdk:"native_network_id"`
-	NetworkTagsSetting    types.Int64  `tfsdk:"network_tags_setting"`
-	TagNetworkIDs         types.List   `tfsdk:"tag_network_ids"`
-	UntagNetworkIDs       types.List   `tfsdk:"untag_network_ids"`
-	VoiceNetworkEnable    types.Bool   `tfsdk:"voice_network_enable"`
-	VoiceDscpEnable       types.Bool   `tfsdk:"voice_dscp_enable"`
-	Speed                 types.Int64  `tfsdk:"speed"`
+	Name                      types.String `tfsdk:"name"`
+	Disable                   types.Bool   `tfsdk:"disable"`
+	ProfileID                 types.String `tfsdk:"profile_id"`
+	ProfileOverrideEnable     types.Bool   `tfsdk:"profile_override_enable"`
+	ProfileVlanOverrideEnable types.Bool   `tfsdk:"profile_vlan_override_enable"`
+	NativeNetworkID           types.String `tfsdk:"native_network_id"`
+	NetworkTagsSetting        types.Int64  `tfsdk:"network_tags_setting"`
+	TagNetworkIDs             types.List   `tfsdk:"tag_network_ids"`
+	UntagNetworkIDs           types.List   `tfsdk:"untag_network_ids"`
+	VoiceNetworkEnable        types.Bool   `tfsdk:"voice_network_enable"`
+	VoiceDscpEnable           types.Bool   `tfsdk:"voice_dscp_enable"`
+	Speed                     types.Int64  `tfsdk:"speed"`
 }
 
 func NewSwitchPortResource() resource.Resource {
@@ -114,6 +116,17 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Computed: true,
 				Default:  booldefault.StaticBool(false),
 			},
+			"profile_vlan_override_enable": schema.BoolAttribute{
+				Description: "Per-port VLAN override enable. Automatically forced to true when " +
+					"`profile_override_enable=true` and `native_network_id` is set (required by " +
+					"access_* profiles; omitting it returns controller error -39840). " +
+					"Computed from the controller on Read; set explicitly only when needed.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
+			},
 			"native_network_id": schema.StringAttribute{
 				Description: "Native (untagged / PVID) network ID for this port. Only honored when " +
 					"`profile_override_enable=true`.",
@@ -136,9 +149,10 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				ElementType: types.StringType,
 			},
 			"untag_network_ids": schema.ListAttribute{
-				Description: "List of untagged (member) VLAN network IDs in addition to the native VLAN. " +
-					"Only honored when `profile_override_enable=true`.",
-				Optional:    true,
+				Description: "Read-only list of untagged VLAN network IDs. The openapi/v1 write " +
+					"path does not accept this field — the controller derives untag=[native] " +
+					"automatically. BREAKING CHANGE: remove `untag_network_ids` from your HCL " +
+					"when upgrading from a prior version. This attribute is now Computed-only.",
 				Computed:    true,
 				ElementType: types.StringType,
 			},
@@ -182,9 +196,11 @@ func (r *SwitchPortResource) Configure(_ context.Context, req resource.Configure
 	r.client = c
 }
 
-// buildSwitchPortPatchPayload converts the model into a PATCH map for the
-// /switches/{mac}/ports/{port} endpoint. Returns nil when the model has no
-// changeable fields populated.
+// buildSwitchPortPatchPayload is retained SOLELY for rollback safety.
+// New callers MUST NOT use this function. Use buildSwitchPortV2Body instead,
+// which produces the openapi/v1 dialect required by UpdateSwitchPortV2.
+// This builder targets the legacy api/v2 /switches/{mac}/ports/{port} endpoint,
+// which the Create/Update handlers no longer call.
 func buildSwitchPortPatchPayload(ctx context.Context, m *SwitchPortResourceModel, diags *[]error) map[string]interface{} {
 	payload := map[string]interface{}{
 		"port":                  m.Port.ValueInt64(),
@@ -230,6 +246,49 @@ func buildSwitchPortPatchPayload(ctx context.Context, m *SwitchPortResourceModel
 	return payload
 }
 
+// buildSwitchPortV2Body converts the Terraform model to the openapi/v1 PATCH
+// body (client.SwitchPortV2). The speed schema attribute is translated to the
+// {linkSpeed, duplex} pair required by the openapi dialect via
+// client.SpeedToLinkDuplex. nil TagNetworkIDs are coerced to an empty slice
+// here as a belt-and-suspenders measure (the client method also does it).
+//
+// NOTE: profileVlanOverrideEnable is passed through from the model as-is.
+// The force logic (when profileOverrideEnable=true + nativeNetworkId set →
+// force profileVlanOverrideEnable=true) lives in UpdateSwitchPortV2, not here.
+func buildSwitchPortV2Body(ctx context.Context, m *SwitchPortResourceModel, diags *[]error) *client.SwitchPortV2 {
+	linkSpeed, duplex := client.SpeedToLinkDuplex(int(m.Speed.ValueInt64()))
+
+	body := &client.SwitchPortV2{
+		Name:                      m.Name.ValueString(),
+		ProfileID:                 m.ProfileID.ValueString(),
+		ProfileOverrideEnable:     m.ProfileOverrideEnable.ValueBool(),
+		ProfileVlanOverrideEnable: m.ProfileVlanOverrideEnable.ValueBool(),
+		NetworkTagsSetting:        int(m.NetworkTagsSetting.ValueInt64()),
+		VoiceNetworkEnable:        m.VoiceNetworkEnable.ValueBool(),
+		LinkSpeed:                 linkSpeed,
+		Duplex:                    duplex,
+		TagIDs:                    []string{},
+	}
+
+	if !m.NativeNetworkID.IsNull() && !m.NativeNetworkID.IsUnknown() && m.NativeNetworkID.ValueString() != "" {
+		body.NativeNetworkID = m.NativeNetworkID.ValueString()
+	}
+
+	if !m.TagNetworkIDs.IsNull() && !m.TagNetworkIDs.IsUnknown() {
+		var ids []string
+		d := m.TagNetworkIDs.ElementsAs(ctx, &ids, false)
+		if d.HasError() {
+			for _, e := range d.Errors() {
+				*diags = append(*diags, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
+			}
+			return nil
+		}
+		body.TagIDs = ids
+	}
+
+	return body
+}
+
 // applySwitchPortToModel writes the API SwitchPort struct back into the
 // Terraform model. Preserves null vs empty-list semantics for
 // tag_network_ids and untag_network_ids.
@@ -239,6 +298,7 @@ func applySwitchPortToModel(ctx context.Context, m *SwitchPortResourceModel, p *
 	m.Disable = types.BoolValue(p.Disable)
 	m.ProfileID = types.StringValue(p.ProfileID)
 	m.ProfileOverrideEnable = types.BoolValue(p.ProfileOverrideEnable)
+	m.ProfileVlanOverrideEnable = types.BoolValue(p.ProfileVlanOverrideEnable)
 	m.NativeNetworkID = types.StringValue(p.NativeNetworkID)
 	m.NetworkTagsSetting = types.Int64Value(int64(p.NetworkTagsSetting))
 	m.VoiceNetworkEnable = types.BoolValue(p.VoiceNetworkEnable)
@@ -279,7 +339,7 @@ func (r *SwitchPortResource) Create(ctx context.Context, req resource.CreateRequ
 	port := int(plan.Port.ValueInt64())
 
 	var buildErrs []error
-	payload := buildSwitchPortPatchPayload(ctx, &plan, &buildErrs)
+	body := buildSwitchPortV2Body(ctx, &plan, &buildErrs)
 	if len(buildErrs) > 0 {
 		for _, e := range buildErrs {
 			resp.Diagnostics.AddError("Building switch port payload", e.Error())
@@ -287,15 +347,10 @@ func (r *SwitchPortResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 
-	if err := r.client.UpdateSwitchPort(ctx, siteID, mac, port, payload); err != nil {
-		resp.Diagnostics.AddError("Error creating (PATCHing) switch port", err.Error())
-		return
-	}
-
-	// Read back to populate computed fields.
-	current, err := r.client.GetSwitchPort(ctx, siteID, mac, port)
+	// UpdateSwitchPortV2 sends PATCH to openapi/v1 and re-reads via api/v2 GET.
+	current, err := r.client.UpdateSwitchPortV2(ctx, siteID, mac, port, body)
 	if err != nil {
-		resp.Diagnostics.AddError("Error reading switch port after create", err.Error())
+		resp.Diagnostics.AddError("Error creating (PATCHing) switch port", err.Error())
 		return
 	}
 	if err := applySwitchPortToModel(ctx, &plan, current); err != nil {
@@ -351,7 +406,7 @@ func (r *SwitchPortResource) Update(ctx context.Context, req resource.UpdateRequ
 	port := int(state.Port.ValueInt64())
 
 	var buildErrs []error
-	payload := buildSwitchPortPatchPayload(ctx, &plan, &buildErrs)
+	body := buildSwitchPortV2Body(ctx, &plan, &buildErrs)
 	if len(buildErrs) > 0 {
 		for _, e := range buildErrs {
 			resp.Diagnostics.AddError("Building switch port payload", e.Error())
@@ -359,14 +414,10 @@ func (r *SwitchPortResource) Update(ctx context.Context, req resource.UpdateRequ
 		return
 	}
 
-	if err := r.client.UpdateSwitchPort(ctx, siteID, mac, port, payload); err != nil {
-		resp.Diagnostics.AddError("Error updating switch port", err.Error())
-		return
-	}
-
-	current, err := r.client.GetSwitchPort(ctx, siteID, mac, port)
+	// UpdateSwitchPortV2 sends PATCH to openapi/v1 and re-reads via api/v2 GET.
+	current, err := r.client.UpdateSwitchPortV2(ctx, siteID, mac, port, body)
 	if err != nil {
-		resp.Diagnostics.AddError("Error reading switch port after update", err.Error())
+		resp.Diagnostics.AddError("Error updating switch port", err.Error())
 		return
 	}
 	plan.ID = state.ID

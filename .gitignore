@@ -34,3 +34,7 @@ test-*/
 
 # Discovery + investigation probe outputs
 dist/
+
+# Tooling / AI session artifacts (not for public history)
+.atl/
+.claude/

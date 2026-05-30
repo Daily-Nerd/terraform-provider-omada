@@ -2,6 +2,49 @@
 
 > **Fork point.** This changelog continues from `emanuelbesliu/terraform-provider-tplink-omada` v2.1.1. The Daily-Nerd fork resets versioning to `0.x.y` to signal a different lineage. Upstream history is preserved below for reference.
 
+## [Unreleased]
+
+### BREAKING CHANGES
+
+* **switch_port:** `untag_network_ids` is now **Computed-only** (read-only output).
+  Remove `untag_network_ids = [...]` from your HCL before upgrading — Terraform will
+  raise a schema validation error if this attribute is set by the user. The controller
+  derives `untag=[native]` automatically on the openapi/v1 write path.
+
+### Features
+
+* **switch_port:** write path migrated to openapi/v1
+  (`/openapi/v1/{omadacId}/sites/{siteId}/switches/{mac}/ports/{port}`).
+  This fixes `-1001` errors on non-pristine ports and `-39840` on `access_*`
+  profiles (both hit on v6 controllers via the old api/v2 endpoint).
+  Read path (api/v2 GET) is unchanged.
+* **switch_port:** new attribute `profile_vlan_override_enable` (Optional, Computed).
+  Automatically forced `true` when `profile_override_enable=true` and
+  `native_network_id` is set (required by access_* profiles; see -39840).
+  Populated from the controller on every Read. No HCL change required for
+  existing configurations — the attribute is Computed and defaults to the
+  controller value.
+
+### Bug Fixes
+
+* **switch_port:** `speed` codes 1, 2, 7, 8 (10Mb HD/FD, 5Gb, 10Gb) have no
+  confirmed openapi/v1 `linkSpeed` values on the tested hardware (SG3218XP-M2).
+  They now silently fall back to auto-negotiate (`linkSpeed=0, duplex=0`) rather
+  than sending an invalid value that triggers `-1001`. Revisit when captures on
+  10M or high-speed models are available. Confirmed codes: 0=auto, 3=100Mb HD,
+  4=100Mb FD, 5=1Gb FD, 6=2.5Gb FD (ADR-3).
+
+### Migration Guide
+
+When upgrading from `v0.2.0` or earlier with `omada_switch_port` resources:
+
+1. Remove any `untag_network_ids = [...]` lines from your HCL.
+2. Run `terraform plan` — the plan should show no diff for other fields (brownfield
+   ports read `profile_vlan_override_enable` from the controller and store it).
+3. If a port shows an unexpected diff after upgrade, it is likely that
+   `profile_vlan_override_enable` changed from unknown to a concrete value — this
+   is expected on first plan after upgrade and resolves after one `terraform apply`.
+
 ## [0.2.0](https://github.com/Daily-Nerd/terraform-provider-omada/compare/v0.1.0...v0.2.0) (2026-05-15)
 
 

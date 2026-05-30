@@ -1481,3 +1481,625 @@ func TestDeleteMDNSRule(t *testing.T) {
 		t.Fatalf("DeleteMDNSRule: %v", err)
 	}
 }
+
+// =============================================================================
+// UpdateSwitchPortV2 Tests
+// =============================================================================
+
+// mockOpenAPIServer creates a test server that handles both the standard
+// Omada auth paths AND a custom openapi path. The openapi path cannot be
+// registered via mockOmadaServer (which only adds /api/v2 prefixed handlers),
+// so we build a raw mux here.
+func mockOpenAPIServer(t *testing.T, openapiHandlers map[string]http.HandlerFunc, v2Handlers map[string]http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	omadacID := "test-omadac-id"
+	token := "test-csrf-token"
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(APIResponse{
+			ErrorCode: 0,
+			Msg:       "Success.",
+			Result: mustMarshal(t, ControllerInfo{
+				OmadacID:      omadacID,
+				ControllerVer: "6.1.0.19",
+				APIVer:        "3",
+			}),
+		})
+	})
+
+	mux.HandleFunc(fmt.Sprintf("/%s/api/v2/login", omadacID), func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(APIResponse{
+			ErrorCode: 0,
+			Msg:       "Success.",
+			Result:    mustMarshal(t, LoginResult{Token: token}),
+		})
+	})
+
+	// Register openapi (non-v2) handlers directly on the mux.
+	for pattern, handler := range openapiHandlers {
+		mux.HandleFunc(pattern, handler)
+	}
+
+	// Register api/v2 handlers with prefix.
+	for pattern, handler := range v2Handlers {
+		prefix := fmt.Sprintf("/%s/api/v2", omadacID)
+		mux.HandleFunc(prefix+pattern, handler)
+	}
+
+	return httptest.NewServer(mux)
+}
+
+// TestUpdateSwitchPortV2_OpenAPIPathAndBody verifies that UpdateSwitchPortV2:
+//   - sends PATCH to the openapi/v1 URL (NOT api/v2)
+//   - includes Csrf-Token header
+//   - coerces nil TagIDs to []
+//   - forces ProfileVlanOverrideEnable=true when ProfileOverrideEnable+NativeNetworkID
+//   - does NOT include /api/v2 in the write URL
+func TestUpdateSwitchPortV2_OpenAPIPathAndBody(t *testing.T) {
+	omadacID := "test-omadac-id"
+	siteID := "site-1"
+	mac := "aa:bb:cc:dd:ee:ff"
+	portNum := 3
+
+	var capturedMethod string
+	var capturedURL string
+	var capturedCsrfToken string
+	var capturedBody SwitchPortV2
+
+	// openapi PATCH handler — path as built by UpdateSwitchPortV2:
+	// {baseURL}/openapi/v1/{omadacID}/sites/{siteID}/switches/{mac}/ports/{port}
+	// On the test server the path portion is everything after the host.
+	openAPIPath := fmt.Sprintf("/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		omadacID, siteID, mac, portNum)
+
+	// Build the switch config for the GetSwitchPort re-read
+	switchCfg := SwitchConfig{
+		MAC:  mac,
+		Name: "test-switch",
+		Ports: []SwitchPort{
+			{
+				Port:                      portNum,
+				Name:                      "port-3",
+				ProfileOverrideEnable:     true,
+				ProfileVlanOverrideEnable: true,
+				NativeNetworkID:           "net-trusted",
+				ProfileID:                 "profile-access",
+			},
+		},
+	}
+
+	server := mockOpenAPIServer(t,
+		map[string]http.HandlerFunc{
+			openAPIPath: func(w http.ResponseWriter, r *http.Request) {
+				capturedMethod = r.Method
+				capturedURL = r.URL.String()
+				capturedCsrfToken = r.Header.Get("Csrf-Token")
+
+				if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+					t.Errorf("decoding body: %v", err)
+				}
+				json.NewEncoder(w).Encode(APIResponse{ErrorCode: 0, Msg: "Success."})
+			},
+		},
+		map[string]http.HandlerFunc{
+			fmt.Sprintf("/sites/%s/switches/%s", siteID, mac): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, switchCfg),
+				})
+			},
+		},
+	)
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	body := &SwitchPortV2{
+		Name:                  "port-3",
+		ProfileID:             "profile-access",
+		ProfileOverrideEnable: true,
+		NativeNetworkID:       "net-trusted",
+		// TagIDs intentionally nil — should be coerced to []
+		TagIDs: nil,
+	}
+
+	got, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum, body)
+	if err != nil {
+		t.Fatalf("UpdateSwitchPortV2: %v", err)
+	}
+
+	// Assert URL contains openapi/v1, not api/v2.
+	if !strings.Contains(capturedURL, "/openapi/v1/") {
+		t.Errorf("URL = %q, want it to contain /openapi/v1/", capturedURL)
+	}
+	if strings.Contains(capturedURL, "/api/v2") {
+		t.Errorf("write URL = %q, must NOT contain /api/v2", capturedURL)
+	}
+
+	// Assert method is PATCH.
+	if capturedMethod != http.MethodPatch {
+		t.Errorf("method = %q, want PATCH", capturedMethod)
+	}
+
+	// Assert Csrf-Token header was sent.
+	if capturedCsrfToken == "" {
+		t.Error("Csrf-Token header was empty; doOpenAPIRequest should set it")
+	}
+
+	// Assert nil TagIDs coerced to empty slice (marshals as [] not null).
+	if capturedBody.TagIDs == nil {
+		t.Error("TagIDs should be coerced to [] before sending, got nil")
+	}
+	if len(capturedBody.TagIDs) != 0 {
+		t.Errorf("TagIDs = %v, want []", capturedBody.TagIDs)
+	}
+
+	// Assert ProfileVlanOverrideEnable forced true (override=true + nativeNetworkId set).
+	if !capturedBody.ProfileVlanOverrideEnable {
+		t.Error("ProfileVlanOverrideEnable should be forced true when ProfileOverrideEnable=true + NativeNetworkID set")
+	}
+
+	// Assert re-read returns a populated SwitchPort.
+	if got == nil {
+		t.Fatal("got nil *SwitchPort from UpdateSwitchPortV2")
+	}
+	if got.Port != portNum {
+		t.Errorf("re-read port = %d, want %d", got.Port, portNum)
+	}
+}
+
+// TestUpdateSwitchPortV2_ErrorSurfacing verifies that a non-transient controller
+// error (e.g. -39840: VLAN profile conflict) is returned as an error whose
+// message contains both the numeric code and the controller's description.
+func TestUpdateSwitchPortV2_ErrorSurfacing(t *testing.T) {
+	omadacID := "test-omadac-id"
+	siteID := "site-1"
+	mac := "aa:bb:cc:dd:ee:ff"
+	portNum := 3
+
+	openAPIPath := fmt.Sprintf("/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		omadacID, siteID, mac, portNum)
+
+	server := mockOpenAPIServer(t,
+		map[string]http.HandlerFunc{
+			openAPIPath: func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: -39840,
+					Msg:       "When the VLAN configuration in the profile bound to the port is disabled, the VLAN configuration of the port cannot follow the profile.",
+				})
+			},
+		},
+		nil,
+	)
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	body := &SwitchPortV2{Name: "port-3", TagIDs: []string{}}
+	_, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum, body)
+	if err == nil {
+		t.Fatal("expected error from UpdateSwitchPortV2 when controller returns -39840, got nil")
+	}
+	if !strings.Contains(err.Error(), "-39840") {
+		t.Errorf("error = %q, want it to contain -39840", err.Error())
+	}
+	if !strings.Contains(err.Error(), "VLAN") {
+		t.Errorf("error = %q, want it to contain the controller message (VLAN)", err.Error())
+	}
+}
+
+// TestUpdateSwitchPortV2_TransientRetry verifies the method retries on
+// errorCode -1 and eventually returns success.
+func TestUpdateSwitchPortV2_TransientRetry(t *testing.T) {
+	omadacID := "test-omadac-id"
+	siteID := "site-1"
+	mac := "aa:bb:cc:dd:ee:ff"
+	portNum := 3
+	attempts := 0
+
+	openAPIPath := fmt.Sprintf("/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		omadacID, siteID, mac, portNum)
+
+	switchCfg := SwitchConfig{
+		MAC:  mac,
+		Name: "test-switch",
+		Ports: []SwitchPort{
+			{Port: portNum, Name: "port-3"},
+		},
+	}
+
+	server := mockOpenAPIServer(t,
+		map[string]http.HandlerFunc{
+			openAPIPath: func(w http.ResponseWriter, r *http.Request) {
+				attempts++
+				if attempts < 3 {
+					// Return transient -1 error.
+					json.NewEncoder(w).Encode(APIResponse{ErrorCode: -1, Msg: "transient"})
+					return
+				}
+				json.NewEncoder(w).Encode(APIResponse{ErrorCode: 0, Msg: "Success."})
+			},
+		},
+		map[string]http.HandlerFunc{
+			fmt.Sprintf("/sites/%s/switches/%s", siteID, mac): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, switchCfg),
+				})
+			},
+		},
+	)
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	body := &SwitchPortV2{Name: "port-3", TagIDs: []string{}}
+	_, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum, body)
+	if err != nil {
+		t.Fatalf("UpdateSwitchPortV2 (retry): %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("attempts = %d, want 3 (2 transients then success)", attempts)
+	}
+}
+
+// TestPortProfile_VlanFields verifies that PortProfile correctly decodes the
+// vlanConfigEnable and networkTagsSetting fields from the controller JSON.
+// These fields are required for the VLAN derivation path in UpdateSwitchPortV2.
+func TestPortProfile_VlanFields(t *testing.T) {
+	raw := `{
+		"id": "prof-1",
+		"name": "access_iot",
+		"vlanConfigEnable": false,
+		"networkTagsSetting": 2,
+		"nativeNetworkId": "net-iot",
+		"tagNetworkIds": [],
+		"poe": 0,
+		"dot1x": 0,
+		"portIsolationEnable": false,
+		"lldpMedEnable": false,
+		"topoNotifyEnable": false,
+		"spanningTreeEnable": false,
+		"loopbackDetectEnable": false,
+		"bandWidthCtrlType": 0,
+		"eeeEnable": false,
+		"flowControlEnable": false,
+		"fastLeaveEnable": false,
+		"loopbackDetectVlanBasedEnable": false,
+		"igmpFastLeaveEnable": false,
+		"mldFastLeaveEnable": false,
+		"dot1pPriority": 0,
+		"trustMode": 0
+	}`
+
+	var p PortProfile
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	if p.VlanConfigEnable != false {
+		t.Errorf("VlanConfigEnable = %v, want false", p.VlanConfigEnable)
+	}
+	if p.NetworkTagsSetting != 2 {
+		t.Errorf("NetworkTagsSetting = %d, want 2", p.NetworkTagsSetting)
+	}
+	if p.NativeNetworkID != "net-iot" {
+		t.Errorf("NativeNetworkID = %q, want %q", p.NativeNetworkID, "net-iot")
+	}
+}
+
+// TestPortProfile_VlanFields_Enabled triangulates with vlanConfigEnable=true so
+// the decoder is exercised for both values (forces real field mapping).
+func TestPortProfile_VlanFields_Enabled(t *testing.T) {
+	raw := `{
+		"id": "prof-2",
+		"name": "trunk_uplink",
+		"vlanConfigEnable": true,
+		"networkTagsSetting": 1,
+		"nativeNetworkId": "net-mgmt",
+		"tagNetworkIds": ["net-iot", "net-trusted"],
+		"poe": 0,
+		"dot1x": 0,
+		"portIsolationEnable": false,
+		"lldpMedEnable": false,
+		"topoNotifyEnable": false,
+		"spanningTreeEnable": false,
+		"loopbackDetectEnable": false,
+		"bandWidthCtrlType": 0,
+		"eeeEnable": false,
+		"flowControlEnable": false,
+		"fastLeaveEnable": false,
+		"loopbackDetectVlanBasedEnable": false,
+		"igmpFastLeaveEnable": false,
+		"mldFastLeaveEnable": false,
+		"dot1pPriority": 0,
+		"trustMode": 0
+	}`
+
+	var p PortProfile
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	if p.VlanConfigEnable != true {
+		t.Errorf("VlanConfigEnable = %v, want true", p.VlanConfigEnable)
+	}
+	if p.NetworkTagsSetting != 1 {
+		t.Errorf("NetworkTagsSetting = %d, want 1", p.NetworkTagsSetting)
+	}
+}
+
+// TestUpdateSwitchPortV2_VlanDerivation_VlanConfigDisabled verifies that when a
+// profile has vlanConfigEnable=false and the caller sends no override/native,
+// UpdateSwitchPortV2 automatically derives VLAN settings from the profile and
+// sends profileVlanOverrideEnable=true + the profile's nativeNetworkId and
+// networkTagsSetting in the PATCH body.
+func TestUpdateSwitchPortV2_VlanDerivation_VlanConfigDisabled(t *testing.T) {
+	omadacID := "test-omadac-id"
+	siteID := "site-1"
+	mac := "aa:bb:cc:dd:ee:ff"
+	portNum := 5
+	profileID := "prof-iot"
+
+	openAPIPath := fmt.Sprintf("/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		omadacID, siteID, mac, portNum)
+
+	// The profile returned by api/v2 GET /setting/lan/profiles.
+	// vlanConfigEnable=false triggers the derivation path.
+	iotProfile := PortProfile{
+		ID:                 profileID,
+		Name:               "access_iot",
+		VlanConfigEnable:   false,
+		NetworkTagsSetting: 2,
+		NativeNetworkID:    "net-iot",
+		TagNetworkIDs:      []string{},
+	}
+	profilesPage := PaginatedResult{
+		TotalRows:   1,
+		CurrentPage: 1,
+		CurrentSize: 1,
+	}
+	profilesPageData, _ := json.Marshal([]PortProfile{iotProfile})
+	profilesPage.Data = profilesPageData
+
+	switchCfg := SwitchConfig{
+		MAC:  mac,
+		Name: "test-switch",
+		Ports: []SwitchPort{
+			{
+				Port:                      portNum,
+				Name:                      "port-5",
+				ProfileID:                 profileID,
+				ProfileVlanOverrideEnable: true,
+				NativeNetworkID:           "net-iot",
+				NetworkTagsSetting:        2,
+			},
+		},
+	}
+
+	var capturedBody SwitchPortV2
+
+	server := mockOpenAPIServer(t,
+		map[string]http.HandlerFunc{
+			openAPIPath: func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+					t.Errorf("decoding PATCH body: %v", err)
+				}
+				json.NewEncoder(w).Encode(APIResponse{ErrorCode: 0, Msg: "Success."})
+			},
+		},
+		map[string]http.HandlerFunc{
+			fmt.Sprintf("/sites/%s/setting/lan/profiles", siteID): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, profilesPage),
+				})
+			},
+			fmt.Sprintf("/sites/%s/switches/%s", siteID, mac): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, switchCfg),
+				})
+			},
+		},
+	)
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	// override=false, no NativeNetworkID — triggers derivation.
+	body := &SwitchPortV2{
+		Name:      "port-5",
+		ProfileID: profileID,
+		// ProfileOverrideEnable intentionally false (zero value)
+		// NativeNetworkID intentionally empty (zero value)
+	}
+
+	got, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum, body)
+	if err != nil {
+		t.Fatalf("UpdateSwitchPortV2: %v", err)
+	}
+
+	// Derivation must have set these three fields.
+	if !capturedBody.ProfileVlanOverrideEnable {
+		t.Error("ProfileVlanOverrideEnable should be true after VLAN derivation (vlanConfigEnable=false profile)")
+	}
+	if capturedBody.NativeNetworkID != "net-iot" {
+		t.Errorf("NativeNetworkID = %q, want %q", capturedBody.NativeNetworkID, "net-iot")
+	}
+	if capturedBody.NetworkTagsSetting != 2 {
+		t.Errorf("NetworkTagsSetting = %d, want 2", capturedBody.NetworkTagsSetting)
+	}
+
+	// Re-read should still succeed.
+	if got == nil {
+		t.Fatal("got nil *SwitchPort")
+	}
+}
+
+// TestUpdateSwitchPortV2_VlanDerivation_VlanConfigEnabled verifies that when
+// vlanConfigEnable=true the derivation path is NOT taken — profileVlanOverrideEnable
+// stays false and NativeNetworkID stays empty in the PATCH body.
+func TestUpdateSwitchPortV2_VlanDerivation_VlanConfigEnabled(t *testing.T) {
+	omadacID := "test-omadac-id"
+	siteID := "site-1"
+	mac := "aa:bb:cc:dd:ee:ff"
+	portNum := 6
+	profileID := "prof-trunk"
+
+	openAPIPath := fmt.Sprintf("/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		omadacID, siteID, mac, portNum)
+
+	trunkProfile := PortProfile{
+		ID:                 profileID,
+		Name:               "trunk_uplink",
+		VlanConfigEnable:   true,
+		NetworkTagsSetting: 1,
+		NativeNetworkID:    "net-mgmt",
+		TagNetworkIDs:      []string{"net-iot"},
+	}
+	profilesPageData, _ := json.Marshal([]PortProfile{trunkProfile})
+	profilesPage := PaginatedResult{
+		TotalRows: 1, CurrentPage: 1, CurrentSize: 1,
+		Data: profilesPageData,
+	}
+
+	switchCfg := SwitchConfig{
+		MAC:  mac,
+		Name: "test-switch",
+		Ports: []SwitchPort{
+			{Port: portNum, Name: "port-6", ProfileID: profileID},
+		},
+	}
+
+	var capturedBody SwitchPortV2
+
+	server := mockOpenAPIServer(t,
+		map[string]http.HandlerFunc{
+			openAPIPath: func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+					t.Errorf("decoding PATCH body: %v", err)
+				}
+				json.NewEncoder(w).Encode(APIResponse{ErrorCode: 0, Msg: "Success."})
+			},
+		},
+		map[string]http.HandlerFunc{
+			fmt.Sprintf("/sites/%s/setting/lan/profiles", siteID): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, profilesPage),
+				})
+			},
+			fmt.Sprintf("/sites/%s/switches/%s", siteID, mac): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, switchCfg),
+				})
+			},
+		},
+	)
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	body := &SwitchPortV2{
+		Name:      "port-6",
+		ProfileID: profileID,
+		// override off, no native — but profile has vlanConfigEnable=true so NO derivation
+	}
+
+	_, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum, body)
+	if err != nil {
+		t.Fatalf("UpdateSwitchPortV2: %v", err)
+	}
+
+	// Derivation must NOT have fired.
+	if capturedBody.ProfileVlanOverrideEnable {
+		t.Error("ProfileVlanOverrideEnable should be false — no derivation for vlanConfigEnable=true profile")
+	}
+	if capturedBody.NativeNetworkID != "" {
+		t.Errorf("NativeNetworkID = %q, want empty — derivation must not copy native when vlanConfigEnable=true", capturedBody.NativeNetworkID)
+	}
+}
+
+// TestUpdateSwitchPortV2_VlanDerivation_ExplicitNativePreserved verifies that
+// when the caller supplies an explicit NativeNetworkID the derivation is skipped
+// and the user-supplied value is preserved in the PATCH body.
+func TestUpdateSwitchPortV2_VlanDerivation_ExplicitNativePreserved(t *testing.T) {
+	omadacID := "test-omadac-id"
+	siteID := "site-1"
+	mac := "aa:bb:cc:dd:ee:ff"
+	portNum := 7
+	profileID := "prof-iot"
+
+	openAPIPath := fmt.Sprintf("/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		omadacID, siteID, mac, portNum)
+
+	iotProfile := PortProfile{
+		ID:                 profileID,
+		Name:               "access_iot",
+		VlanConfigEnable:   false,
+		NetworkTagsSetting: 2,
+		NativeNetworkID:    "net-iot",
+		TagNetworkIDs:      []string{},
+	}
+	profilesPageData, _ := json.Marshal([]PortProfile{iotProfile})
+	profilesPage := PaginatedResult{
+		TotalRows: 1, CurrentPage: 1, CurrentSize: 1,
+		Data: profilesPageData,
+	}
+
+	switchCfg := SwitchConfig{
+		MAC:  mac,
+		Name: "test-switch",
+		Ports: []SwitchPort{
+			{Port: portNum, Name: "port-7", ProfileID: profileID, NativeNetworkID: "net-override"},
+		},
+	}
+
+	var capturedBody SwitchPortV2
+
+	server := mockOpenAPIServer(t,
+		map[string]http.HandlerFunc{
+			openAPIPath: func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+					t.Errorf("decoding PATCH body: %v", err)
+				}
+				json.NewEncoder(w).Encode(APIResponse{ErrorCode: 0, Msg: "Success."})
+			},
+		},
+		map[string]http.HandlerFunc{
+			fmt.Sprintf("/sites/%s/setting/lan/profiles", siteID): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, profilesPage),
+				})
+			},
+			fmt.Sprintf("/sites/%s/switches/%s", siteID, mac): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, switchCfg),
+				})
+			},
+		},
+	)
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	// User supplies explicit NativeNetworkID — derivation must be skipped.
+	body := &SwitchPortV2{
+		Name:            "port-7",
+		ProfileID:       profileID,
+		NativeNetworkID: "net-override",
+	}
+
+	_, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum, body)
+	if err != nil {
+		t.Fatalf("UpdateSwitchPortV2: %v", err)
+	}
+
+	// User value must be preserved, derivation skipped.
+	if capturedBody.NativeNetworkID != "net-override" {
+		t.Errorf("NativeNetworkID = %q, want %q (user value must be preserved)", capturedBody.NativeNetworkID, "net-override")
+	}
+	if capturedBody.ProfileVlanOverrideEnable {
+		t.Error("ProfileVlanOverrideEnable should be false when user supplied explicit native (no derivation)")
+	}
+}

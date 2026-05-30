@@ -336,8 +336,15 @@ type MultiCastSetting struct {
 
 // PortProfile represents a switch port profile.
 type PortProfile struct {
-	ID                            string               `json:"id,omitempty"`
-	Name                          string               `json:"name"`
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name"`
+	// VlanConfigEnable is false when the controller manages VLAN via the new
+	// UI (openapi surface). When false, UpdateSwitchPortV2 must derive VLAN
+	// settings from the profile rather than relying on the controller default.
+	VlanConfigEnable bool `json:"vlanConfigEnable"`
+	// NetworkTagsSetting mirrors the openapi field of the same name.
+	// 2 = untagged-from-native; used with NativeNetworkID by the controller.
+	NetworkTagsSetting            int                  `json:"networkTagsSetting"`
 	NativeNetworkID               string               `json:"nativeNetworkId,omitempty"`
 	TagNetworkIDs                 []string             `json:"tagNetworkIds"`
 	UntagNetworkIDs               []string             `json:"untagNetworkIds,omitempty"`
@@ -2342,23 +2349,42 @@ type SwitchSNMP struct {
 
 // SwitchPort represents a port configuration on a switch.
 type SwitchPort struct {
-	ID                    string   `json:"id,omitempty"`
-	Port                  int      `json:"port"`
-	Name                  string   `json:"name"`
-	Disable               bool     `json:"disable"`
-	Type                  int      `json:"type"`
-	MaxSpeed              int      `json:"maxSpeed,omitempty"`
-	NativeNetworkID       string   `json:"nativeNetworkId,omitempty"`
-	NetworkTagsSetting    int      `json:"networkTagsSetting"`
-	TagNetworkIDs         []string `json:"tagNetworkIds"`
-	UntagNetworkIDs       []string `json:"untagNetworkIds"`
-	VoiceNetworkEnable    bool     `json:"voiceNetworkEnable"`
-	VoiceDscpEnable       bool     `json:"voiceDscpEnable"`
-	ProfileID             string   `json:"profileId"`
-	ProfileName           string   `json:"profileName,omitempty"`
-	ProfileOverrideEnable bool     `json:"profileOverrideEnable"`
-	Operation             string   `json:"operation,omitempty"`
-	Speed                 int      `json:"speed"`
+	ID                        string   `json:"id,omitempty"`
+	Port                      int      `json:"port"`
+	Name                      string   `json:"name"`
+	Disable                   bool     `json:"disable"`
+	Type                      int      `json:"type"`
+	MaxSpeed                  int      `json:"maxSpeed,omitempty"`
+	NativeNetworkID           string   `json:"nativeNetworkId,omitempty"`
+	NetworkTagsSetting        int      `json:"networkTagsSetting"`
+	TagNetworkIDs             []string `json:"tagNetworkIds"`
+	UntagNetworkIDs           []string `json:"untagNetworkIds"`
+	VoiceNetworkEnable        bool     `json:"voiceNetworkEnable"`
+	VoiceDscpEnable           bool     `json:"voiceDscpEnable"`
+	ProfileID                 string   `json:"profileId"`
+	ProfileName               string   `json:"profileName,omitempty"`
+	ProfileOverrideEnable     bool     `json:"profileOverrideEnable"`
+	ProfileVlanOverrideEnable bool     `json:"profileVlanOverrideEnable"`
+	Operation                 string   `json:"operation,omitempty"`
+	Speed                     int      `json:"speed"`
+}
+
+// SwitchPortV2 is the openapi/v1 PATCH body for a single switch port.
+// Distinct from SwitchPort (the api/v2 GET shape). The field set was captured
+// from the v6 web UI; api/v2-only fields (port, disable, voiceDscpEnable,
+// type, maxSpeed) are intentionally absent. tagIds replaces tagNetworkIds;
+// untagNetworkIds is dropped (controller derives untag=[native] automatically).
+type SwitchPortV2 struct {
+	Name                      string   `json:"name"`
+	ProfileID                 string   `json:"profileId"`
+	ProfileOverrideEnable     bool     `json:"profileOverrideEnable"`
+	ProfileVlanOverrideEnable bool     `json:"profileVlanOverrideEnable"`
+	NativeNetworkID           string   `json:"nativeNetworkId,omitempty"`
+	NetworkTagsSetting        int      `json:"networkTagsSetting"`
+	TagIDs                    []string `json:"tagIds"`
+	VoiceNetworkEnable        bool     `json:"voiceNetworkEnable"`
+	LinkSpeed                 int      `json:"linkSpeed"`
+	Duplex                    int      `json:"duplex"`
 }
 
 // SwitchServiceConfig is the payload for PUT /switches/{mac}/config/service.
@@ -2499,11 +2525,138 @@ func (c *Client) UpdateSwitchConfig(ctx context.Context, siteID, mac string, con
 	return &updated, nil
 }
 
+// speedToLinkSpeedDuplex maps the Terraform schema speed code to the openapi/v1
+// {linkSpeed, duplex} pair captured from a live SG3218XP-M2 controller.
+// Only confirmed entries are listed; unknown codes fall back to (0,0) = auto-negotiate.
+// Reference: GitHub issue #40 / design ADR-3.
+//
+// Speed code meanings (api/v2 schema):
+//
+//	0 = auto-neg, 1 = 10Mb HD, 2 = 10Mb FD, 3 = 100Mb HD, 4 = 100Mb FD,
+//	5 = 1Gb FD,   6 = 2.5Gb FD, 7 = 5Gb FD,  8 = 10Gb FD
+var speedToLinkSpeedDuplex = map[int]struct{ LinkSpeed, Duplex int }{
+	0: {0, 0}, // auto-neg
+	3: {2, 1}, // 100Mb HD
+	4: {2, 2}, // 100Mb FD
+	5: {3, 2}, // 1Gb FD
+	6: {4, 2}, // 2.5Gb FD
+	// Codes 1,2,7,8 have no confirmed openapi linkSpeed values.
+	// They fall back to (0,0) auto-negotiate — safe universal default.
+}
+
+// SpeedToLinkDuplex translates a Terraform schema speed code to the
+// openapi/v1 linkSpeed and duplex integer pair. Unknown speed codes fall back
+// to (0,0) (auto-negotiate). Exported so the resource layer can use it in
+// buildSwitchPortV2Body without duplicating the table.
+func SpeedToLinkDuplex(speed int) (linkSpeed, duplex int) {
+	if pair, ok := speedToLinkSpeedDuplex[speed]; ok {
+		return pair.LinkSpeed, pair.Duplex
+	}
+	return 0, 0
+}
+
 // UpdateSwitchPort updates a single port on a switch via PATCH /switches/{mac}/ports/{port}.
 // This endpoint works universally across all switch series without the /es/ prefix.
 func (c *Client) UpdateSwitchPort(ctx context.Context, siteID, mac string, port int, config map[string]interface{}) error {
 	_, err := c.doSiteRequest(ctx, siteID, http.MethodPatch, fmt.Sprintf("/switches/%s/ports/%d", mac, port), config)
 	return err
+}
+
+// UpdateSwitchPortV2 PATCHes a single switch port via the openapi/v1 surface,
+// mirroring UpdatePortProfileV2. Auth is via Csrf-Token header (no ?token=).
+//
+// The method:
+//  1. Forces ProfileVlanOverrideEnable=true when ProfileOverrideEnable is true
+//     and NativeNetworkID is non-empty (access_* profiles require it; omitting
+//     it returns -39840).
+//  2. VLAN derivation for profiles with vlanConfigEnable=false: when override
+//     is off and no explicit NativeNetworkID is set, fetches the bound profile
+//     and copies its nativeNetworkId, networkTagsSetting, and tagNetworkIds
+//     into the body, setting profileVlanOverrideEnable=true. This prevents
+//     -39840 for access_*/trunk_* profiles whose VLAN the openapi surface
+//     cannot derive server-side. Best-effort: on profile fetch error the PATCH
+//     is sent as-is and the controller returns its own descriptive error.
+//  3. Coerces nil TagIDs to an empty slice so the controller receives [] not null.
+//  4. Retries on transient errorCode -1 with 500ms/1s/2s backoffs.
+//  5. Re-reads the port via the legacy api/v2 GET and returns the full
+//     SwitchPort struct (the openapi PATCH response is just {errorCode:0}).
+//
+// Read path stays api/v2 (ADR-5). The legacy UpdateSwitchPort remains intact.
+func (c *Client) UpdateSwitchPortV2(ctx context.Context, siteID, mac string, port int, body *SwitchPortV2) (*SwitchPort, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+
+	// Serialize on the same gateway/provisioning lane as UpdatePortProfileV2.
+	c.createMu.Lock()
+	defer c.createMu.Unlock()
+
+	// Force profileVlanOverrideEnable for access_* profiles. The controller
+	// silently requires it when profileOverrideEnable=true + nativeNetworkId
+	// is set; omitting it returns -39840.
+	if body.ProfileOverrideEnable && body.NativeNetworkID != "" {
+		body.ProfileVlanOverrideEnable = true
+	}
+
+	// VLAN derivation for profiles with vlanConfigEnable=false.
+	// The openapi/v1 write path does NOT derive VLAN server-side (unlike
+	// the legacy api/v2 write). When a profile has vlanConfigEnable=false
+	// and the caller has not supplied an override or explicit native VLAN,
+	// we fetch the profile and copy its VLAN settings into the body so the
+	// controller accepts the request (otherwise it returns -39840).
+	// This is best-effort: if the profile fetch fails we proceed without
+	// derivation and let the controller return its own descriptive error.
+	if !body.ProfileOverrideEnable && body.ProfileID != "" && body.NativeNetworkID == "" {
+		if prof, err := c.GetPortProfile(ctx, siteID, body.ProfileID); err == nil && !prof.VlanConfigEnable {
+			body.ProfileVlanOverrideEnable = true
+			body.NativeNetworkID = prof.NativeNetworkID
+			body.NetworkTagsSetting = prof.NetworkTagsSetting
+			if prof.TagNetworkIDs == nil {
+				body.TagIDs = []string{}
+			} else {
+				body.TagIDs = prof.TagNetworkIDs
+			}
+		}
+	}
+
+	// Defend against nil slice marshaling as JSON null — the controller
+	// is strict and expects [] when there are no tagged VLANs.
+	if body.TagIDs == nil {
+		body.TagIDs = []string{}
+	}
+
+	url := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		c.baseURL, c.omadacID, siteID, mac, port)
+
+	// Bounded retry on transient errorCode -1. Mirrors UpdatePortProfileV2.
+	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err := c.doOpenAPIRequest(ctx, http.MethodPatch, url, body)
+		if err == nil {
+			lastErr = nil
+			break
+		}
+		if !isTransientMinus1(err) {
+			return nil, err
+		}
+		lastErr = err
+		if attempt == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoffs[attempt]):
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	// Response is just {"errorCode":0,"msg":"Success."}. Re-read via the
+	// legacy api/v2 GET to return a populated SwitchPort for state.
+	return c.GetSwitchPort(ctx, siteID, mac, port)
 }
 
 // GetSwitchPort fetches the full switch config and returns a single port by
