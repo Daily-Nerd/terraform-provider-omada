@@ -223,3 +223,69 @@ func TestACLRule_SetStateFromAPI_WanInIDs(t *testing.T) {
 		t.Errorf("model.WanInIDs = %v; want [3_155873a0d67448d880cc94324407c515]", wanIDs)
 	}
 }
+
+// =============================================================================
+// WAN-IN + Network source validation (BUG 2 — plan-time guard, -33792)
+// =============================================================================
+
+// TestACLRule_ValidateWanInNetworkSource_RejectsNetworkSourceOnLanToWan verifies
+// that validateWanInNetworkSource returns an error when lan_to_wan=true and
+// source_type=0 (Network). The Omada controller rejects this combination with
+// -33792 ("If the ACL direction is set to WAN IN, then the source cannot select
+// SSID, Network or ! Network"). Catching it at plan time avoids a cryptic
+// apply-time error.
+func TestACLRule_ValidateWanInNetworkSource_RejectsNetworkSourceOnLanToWan(t *testing.T) {
+	plan := &ACLRuleResourceModel{
+		LanToWan:   types.BoolValue(true),
+		SourceType: types.Int64Value(0), // 0 = Network
+	}
+
+	err := validateWanInNetworkSource(plan)
+	if err == nil {
+		t.Fatal("expected error for lan_to_wan=true + source_type=0 (Network), got nil")
+	}
+	if !contains(err.Error(), "-33792") {
+		t.Errorf("error message should reference -33792, got: %s", err.Error())
+	}
+}
+
+// TestACLRule_ValidateWanInNetworkSource_AllowsIPGroupSourceOnLanToWan verifies
+// that the guard does NOT fire for lan_to_wan=true + source_type=1 (IP group).
+// This is the correct combination for internet-bound rules.
+func TestACLRule_ValidateWanInNetworkSource_AllowsIPGroupSourceOnLanToWan(t *testing.T) {
+	plan := &ACLRuleResourceModel{
+		LanToWan:   types.BoolValue(true),
+		SourceType: types.Int64Value(1), // 1 = IP group (valid for WAN-IN)
+	}
+
+	if err := validateWanInNetworkSource(plan); err != nil {
+		t.Errorf("expected no error for lan_to_wan=true + source_type=1, got: %v", err)
+	}
+}
+
+// TestACLRule_ValidateWanInNetworkSource_AllowsNetworkSourceOnLanToLan verifies
+// that the guard does NOT fire for lan_to_lan rules regardless of source_type.
+// source_type=0 (Network) is valid and common on LAN-to-LAN rules.
+func TestACLRule_ValidateWanInNetworkSource_AllowsNetworkSourceOnLanToLan(t *testing.T) {
+	plan := &ACLRuleResourceModel{
+		LanToWan:   types.BoolValue(false),
+		SourceType: types.Int64Value(0), // Network source — fine on lan_to_lan
+	}
+
+	if err := validateWanInNetworkSource(plan); err != nil {
+		t.Errorf("expected no error for lan_to_wan=false + source_type=0, got: %v", err)
+	}
+}
+
+// contains is a helper used by tests in this file.
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		func() bool {
+			for i := 0; i <= len(s)-len(substr); i++ {
+				if s[i:i+len(substr)] == substr {
+					return true
+				}
+			}
+			return false
+		}())
+}

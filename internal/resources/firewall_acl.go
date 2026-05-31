@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -157,6 +158,28 @@ func (r *ACLRuleResource) Configure(_ context.Context, req resource.ConfigureReq
 	r.client = c
 }
 
+// validateWanInNetworkSource guards against the Omada API constraint that
+// forbids a Network source (source_type=0) on a LAN→WAN rule. The controller
+// rejects this combination with error code -33792:
+//
+//	"If the ACL direction is set to WAN IN, then the source cannot select
+//	 SSID, Network or ! Network."
+//
+// For internet-bound rules (lan_to_wan=true) the source must be an IP group
+// (source_type=1). This function returns a descriptive error so the plan can
+// surface the problem before the apply-time API rejection.
+// LAN-to-LAN rules are unaffected — source_type=0 is valid and common there.
+func validateWanInNetworkSource(plan *ACLRuleResourceModel) error {
+	if plan.LanToWan.ValueBool() && plan.SourceType.ValueInt64() == 0 {
+		return errors.New(
+			"Omada rejects a Network source on a LAN→WAN rule (-33792): " +
+				"\"If the ACL direction is set to WAN IN, then the source cannot select SSID, Network or ! Network.\" " +
+				"Use an ip_group source (source_type=1) for internet-bound rules.",
+		)
+	}
+	return nil
+}
+
 // buildACLRuleFromPlan constructs a client.ACLRule from the resource plan.
 // Empty custom-ACL slices (customAclOsws/Stacks/Devices) and direction arrays
 // (wanInIds/vpnInIds) are always initialized to []string{} so they serialize
@@ -227,6 +250,13 @@ func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest
 	var plan ACLRuleResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Plan-time guard: Omada rejects Network sources on LAN→WAN rules (-33792).
+	// Surface this as a clear diagnostic before hitting the API.
+	if err := validateWanInNetworkSource(&plan); err != nil {
+		resp.Diagnostics.AddError("Invalid ACL rule configuration", err.Error())
 		return
 	}
 
