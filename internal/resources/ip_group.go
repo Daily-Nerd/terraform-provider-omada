@@ -235,7 +235,14 @@ func (r *IPGroupResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	err := r.client.DeleteIPGroup(ctx, state.SiteID.ValueString(), state.ID.ValueString())
+	// The v6/ER707 delete path requires the type segment:
+	// DELETE /setting/profiles/groups/{groupType}/{id}
+	// Read the type from state (Computed, set by setStateFromAPI from the API
+	// response). Fall back to 0 (IP-only) if the state value is somehow
+	// null/unknown — this provider only creates type-0 groups.
+	groupType := int(state.Type.ValueInt64())
+
+	err := r.client.DeleteIPGroup(ctx, state.SiteID.ValueString(), groupType, state.ID.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error deleting IP group", err.Error())
 		return

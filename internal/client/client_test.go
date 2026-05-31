@@ -1424,8 +1424,9 @@ func TestUpdateIPGroup_EmptyResult(t *testing.T) {
 }
 
 func TestDeleteIPGroup(t *testing.T) {
+	// Path must include the type segment: /setting/profiles/groups/{type}/{id}
 	server := mockOmadaServer(t, map[string]http.HandlerFunc{
-		"/sites/site-1/setting/profiles/groups/ipg-1": func(w http.ResponseWriter, r *http.Request) {
+		"/sites/site-1/setting/profiles/groups/0/ipg-1": func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodDelete {
 				t.Errorf("expected DELETE, got %s", r.Method)
 			}
@@ -1438,7 +1439,7 @@ func TestDeleteIPGroup(t *testing.T) {
 	defer server.Close()
 	c := newTestClient(t, server)
 
-	err := c.DeleteIPGroup(context.Background(), "site-1", "ipg-1")
+	err := c.DeleteIPGroup(context.Background(), "site-1", 0, "ipg-1")
 	if err != nil {
 		t.Fatalf("DeleteIPGroup: %v", err)
 	}
@@ -2846,5 +2847,48 @@ func TestModifyACLIndex(t *testing.T) {
 	}
 	if capturedBody.Indexes["id-b"] != 2 {
 		t.Errorf("indexes[id-b] = %d, want 2", capturedBody.Indexes["id-b"])
+	}
+}
+
+// =============================================================================
+// DeleteIPGroup — type-segment path test (BUG 1 fix)
+// =============================================================================
+
+// TestDeleteIPGroup_IncludesTypeSegment asserts that DeleteIPGroup sends DELETE
+// to /setting/profiles/groups/{groupType}/{id} — the v6/ER707 path that includes
+// the type segment. Without the type segment the controller returns -1600
+// ("Unsupported request path"). groupType 0 = IP-only group.
+func TestDeleteIPGroup_IncludesTypeSegment(t *testing.T) {
+	const siteID = "site-1"
+	const groupID = "6a1a9ee944a75c2be56118a1"
+	const groupType = 0
+
+	capturedPath := ""
+
+	server := mockOmadaServer(t, map[string]http.HandlerFunc{
+		// Correct v6 path: /setting/profiles/groups/{type}/{id}
+		fmt.Sprintf("/sites/%s/setting/profiles/groups/%d/%s", siteID, groupType, groupID): func(w http.ResponseWriter, r *http.Request) {
+			capturedPath = r.URL.Path
+			if r.Method != http.MethodDelete {
+				t.Errorf("expected DELETE, got %s", r.Method)
+			}
+			json.NewEncoder(w).Encode(APIResponse{
+				ErrorCode: 0,
+				Result:    json.RawMessage(`{}`),
+			})
+		},
+	})
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	err := c.DeleteIPGroup(context.Background(), siteID, groupType, groupID)
+	if err != nil {
+		t.Fatalf("DeleteIPGroup: %v", err)
+	}
+
+	omadacID := "test-omadac-id"
+	wantPath := fmt.Sprintf("/%s/api/v2/sites/%s/setting/profiles/groups/%d/%s", omadacID, siteID, groupType, groupID)
+	if capturedPath != wantPath {
+		t.Errorf("DELETE path = %q, want %q (missing type segment)", capturedPath, wantPath)
 	}
 }

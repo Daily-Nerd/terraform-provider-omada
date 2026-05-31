@@ -3054,9 +3054,13 @@ func (c *Client) UpdateIPGroup(ctx context.Context, siteID, groupID string, grou
 }
 
 // DeleteIPGroup deletes an IP group.
-// Endpoint: DELETE /setting/profiles/groups/{id} (v6/ER707 path).
-func (c *Client) DeleteIPGroup(ctx context.Context, siteID, groupID string) error {
-	_, err := c.doSiteRequest(ctx, siteID, http.MethodDelete, fmt.Sprintf("/setting/profiles/groups/%s", groupID), nil)
+// Endpoint: DELETE /setting/profiles/groups/{groupType}/{id} (v6/ER707 path).
+// The {groupType} segment is required by the controller; omitting it returns
+// -1600 "Unsupported request path". This provider only manages type-0
+// (IP-only) groups, but the parameter is explicit so callers can pass the
+// value read from state rather than hardcoding a constant.
+func (c *Client) DeleteIPGroup(ctx context.Context, siteID string, groupType int, groupID string) error {
+	_, err := c.doSiteRequest(ctx, siteID, http.MethodDelete, fmt.Sprintf("/setting/profiles/groups/%d/%s", groupType, groupID), nil)
 	return err
 }
 
