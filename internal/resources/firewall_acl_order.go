@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -15,6 +16,14 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+// aclOrderMaxAttempts is the total number of ModifyACLIndex + verify attempts
+// before a hard diagnostic error is returned. Overridable by tests.
+var aclOrderMaxAttempts = 3
+
+// aclOrderRetryDelay is the pause between verify-and-retry attempts.
+// Zero means no sleep — tests set it to 0 to avoid slow test runs.
+var aclOrderRetryDelay = 500 * time.Millisecond
 
 var _ resource.Resource = &FirewallACLOrderResource{}
 var _ resource.ResourceWithImportState = &FirewallACLOrderResource{}
@@ -46,6 +55,73 @@ func buildIndexMap(ruleIDs []string) map[string]int {
 		m[id] = i + 1
 	}
 	return m
+}
+
+// verifyACLOrder checks whether the live ACL rule list reflects the desired
+// order for the managed rule IDs.
+//
+// Comparison strategy — full managed-set ordering:
+// The order resource owns the global order for a site+type pair, so rule_ids
+// is always the complete managed set for that type. The comparison checks that
+// the managed IDs appear in the desired order in the live list (filtering
+// out non-managed rules the controller may hold). This reuses orderedManagedIDs,
+// which already implements exactly this semantics.
+//
+// Returns true when live order matches desired; false otherwise.
+func verifyACLOrder(live []client.ACLRule, aclType int, desired []string) bool {
+	liveOrdered := orderedManagedIDs(live, aclType, desired)
+	if len(liveOrdered) != len(desired) {
+		return false
+	}
+	for i, id := range desired {
+		if liveOrdered[i] != id {
+			return false
+		}
+	}
+	return true
+}
+
+// applyACLOrderWithVerify calls ModifyACLIndex then verifies the live order
+// matches. On mismatch it retries up to aclOrderMaxAttempts total attempts
+// (including the first). If after all attempts the order still does not match,
+// it returns a non-nil error with a diagnostic message.
+//
+// The error string is intentionally human-readable for the Terraform UI.
+func applyACLOrderWithVerify(ctx context.Context, c *client.Client, siteID string, aclType int, ruleIDs []string) error {
+	for attempt := 1; attempt <= aclOrderMaxAttempts; attempt++ {
+		if err := c.ModifyACLIndex(ctx, siteID, aclType, buildIndexMap(ruleIDs)); err != nil {
+			return err
+		}
+
+		live, err := c.ListACLRules(ctx, siteID, aclType)
+		if err != nil {
+			return fmt.Errorf("reading ACL rules for order verification: %w", err)
+		}
+
+		if verifyACLOrder(live, aclType, ruleIDs) {
+			return nil
+		}
+
+		if attempt < aclOrderMaxAttempts && aclOrderRetryDelay > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(aclOrderRetryDelay):
+			}
+		}
+	}
+
+	// All attempts exhausted — build the live order string for the diagnostic.
+	live, _ := c.ListACLRules(ctx, siteID, aclType)
+	liveOrdered := orderedManagedIDs(live, aclType, ruleIDs)
+	return fmt.Errorf("ACL order not applied after %d attempts. "+
+		"Live order: [%s], requested: [%s]. "+
+		"This controller (ER707/v6) intermittently ignores reorder requests. "+
+		"Re-run terraform apply; if it persists, reorder manually in the UI.",
+		aclOrderMaxAttempts,
+		strings.Join(liveOrdered, ", "),
+		strings.Join(ruleIDs, ", "),
+	)
 }
 
 func NewFirewallACLOrderResource() resource.Resource {
@@ -123,8 +199,12 @@ func (r *FirewallACLOrderResource) Create(ctx context.Context, req resource.Crea
 		return
 	}
 
-	if err := r.client.ModifyACLIndex(ctx, siteID, aclType, buildIndexMap(ruleIDs)); err != nil {
-		resp.Diagnostics.AddError("Error setting ACL order", err.Error())
+	if err := applyACLOrderWithVerify(ctx, r.client, siteID, aclType, ruleIDs); err != nil {
+		if strings.Contains(err.Error(), "ACL order not applied") {
+			resp.Diagnostics.AddError("ACL order not applied", err.Error())
+		} else {
+			resp.Diagnostics.AddError("Error setting ACL order", err.Error())
+		}
 		return
 	}
 
@@ -231,8 +311,12 @@ func (r *FirewallACLOrderResource) Update(ctx context.Context, req resource.Upda
 		return
 	}
 
-	if err := r.client.ModifyACLIndex(ctx, siteID, aclType, buildIndexMap(ruleIDs)); err != nil {
-		resp.Diagnostics.AddError("Error updating ACL order", err.Error())
+	if err := applyACLOrderWithVerify(ctx, r.client, siteID, aclType, ruleIDs); err != nil {
+		if strings.Contains(err.Error(), "ACL order not applied") {
+			resp.Diagnostics.AddError("ACL order not applied", err.Error())
+		} else {
+			resp.Diagnostics.AddError("Error updating ACL order", err.Error())
+		}
 		return
 	}
 

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
@@ -452,6 +453,285 @@ func TestFirewallACLOrder_OrderedManagedIDs_FiltersByType(t *testing.T) {
 	want := []string{"gw-b", "gw-a"} // type 0 only, sorted by index
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("orderedManagedIDs = %v, want %v (type-1 rule must be excluded)", got, want)
+	}
+}
+
+// =============================================================================
+// Step 3 — verify-after-reorder tests (RED until implementation lands)
+// =============================================================================
+
+// mockACLOrderServerDynamic is like mockACLOrderServer but uses a function to
+// produce the ACL list response on each GET. This lets tests simulate the
+// controller returning wrong order on some calls and correct on others.
+func mockACLOrderServerDynamic(
+	t *testing.T,
+	siteID string,
+	rulesFunc func() []client.ACLRule,
+	modifyHits *int,
+	lastModifyBody *map[string]int,
+) *httptest.Server {
+	t.Helper()
+	omadacID := "test-omadac-id"
+	token := "test-csrf-token"
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/info", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(client.APIResponse{
+			ErrorCode: 0,
+			Msg:       "Success.",
+			Result:    mustMarshalWiring(t, client.ControllerInfo{OmadacID: omadacID, ControllerVer: "6.1.0", APIVer: "3"}),
+		})
+	})
+
+	mux.HandleFunc(fmt.Sprintf("/%s/api/v2/login", omadacID), func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(client.APIResponse{
+			ErrorCode: 0,
+			Msg:       "Success.",
+			Result:    mustMarshalWiring(t, client.LoginResult{Token: token}),
+		})
+	})
+
+	modifyPath := fmt.Sprintf("/%s/api/v2/sites/%s/cmd/acls/modifyIndex", omadacID, siteID)
+	mux.HandleFunc(modifyPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			*modifyHits++
+			var body struct {
+				Indexes map[string]int `json:"indexes"`
+				Type    int            `json:"type"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decoding modifyIndex body: %v", err)
+			}
+			*lastModifyBody = body.Indexes
+		}
+		json.NewEncoder(w).Encode(client.APIResponse{ErrorCode: 0, Msg: "Success."})
+	})
+
+	aclListPath := fmt.Sprintf("/%s/api/v2/sites/%s/setting/firewall/acls", omadacID, siteID)
+	mux.HandleFunc(aclListPath, func(w http.ResponseWriter, _ *http.Request) {
+		rules := rulesFunc()
+		listResult := client.ACLListResult{
+			TotalRows:   len(rules),
+			CurrentPage: 1,
+			CurrentSize: len(rules),
+			Data:        rules,
+		}
+		json.NewEncoder(w).Encode(client.APIResponse{
+			ErrorCode: 0,
+			Msg:       "Success.",
+			Result:    mustMarshalWiring(t, listResult),
+		})
+	})
+
+	return httptest.NewServer(mux)
+}
+
+// TestACLOrder_VerifySucceedsWhenOrderMatches: modifyIndex succeeds and the
+// live list returns rules in the requested order. Create must succeed (no error).
+func TestACLOrder_VerifySucceedsWhenOrderMatches(t *testing.T) {
+	// Override retry params so the test completes instantly.
+	origAttempts := aclOrderMaxAttempts
+	origDelay := aclOrderRetryDelay
+	aclOrderMaxAttempts = 3
+	aclOrderRetryDelay = 0
+	defer func() {
+		aclOrderMaxAttempts = origAttempts
+		aclOrderRetryDelay = origDelay
+	}()
+
+	siteID := "site-verify-ok"
+	ruleIDs := []string{"rule-1", "rule-2", "rule-3"}
+
+	var modifyHits int
+	var lastModifyBody map[string]int
+
+	// rulesFunc always returns rules in the correct (desired) order.
+	rulesFunc := func() []client.ACLRule {
+		return []client.ACLRule{
+			{ID: "rule-1", Type: 0, Index: 1},
+			{ID: "rule-2", Type: 0, Index: 2},
+			{ID: "rule-3", Type: 0, Index: 3},
+		}
+	}
+
+	server := mockACLOrderServerDynamic(t, siteID, rulesFunc, &modifyHits, &lastModifyBody)
+	defer server.Close()
+
+	c, err := client.NewClient(server.URL, "admin", "password", true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	r := &FirewallACLOrderResource{client: c}
+
+	ctx := context.Background()
+	plan := buildACLOrderPlan(t, r, siteID, 0, ruleIDs)
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	nullRaw := tftypes.NewValue(schemaResp.Schema.Type().TerraformType(ctx), nil)
+
+	req := resource.CreateRequest{Plan: plan}
+	resp := resource.CreateResponse{
+		State: tfsdk.State{Schema: schemaResp.Schema, Raw: nullRaw},
+	}
+
+	r.Create(ctx, req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create should succeed when order matches, got errors: %v", resp.Diagnostics)
+	}
+	if modifyHits != 1 {
+		t.Errorf("modifyIndex called %d times, want 1", modifyHits)
+	}
+}
+
+// TestACLOrder_RetriesThenErrorsWhenOrderNeverApplies: modifyIndex always
+// returns success but the live list always returns wrong order. After
+// aclOrderMaxAttempts attempts Create must return the "ACL order not applied"
+// diagnostic error.
+func TestACLOrder_RetriesThenErrorsWhenOrderNeverApplies(t *testing.T) {
+	origAttempts := aclOrderMaxAttempts
+	origDelay := aclOrderRetryDelay
+	aclOrderMaxAttempts = 3
+	aclOrderRetryDelay = 0
+	defer func() {
+		aclOrderMaxAttempts = origAttempts
+		aclOrderRetryDelay = origDelay
+	}()
+
+	siteID := "site-never-applies"
+	ruleIDs := []string{"rule-1", "rule-2", "rule-3"}
+
+	var modifyHits int
+	var lastModifyBody map[string]int
+
+	// rulesFunc always returns rules in wrong (alphabetical) order.
+	rulesFunc := func() []client.ACLRule {
+		return []client.ACLRule{
+			{ID: "rule-1", Type: 0, Index: 1},
+			{ID: "rule-3", Type: 0, Index: 2}, // wrong: rule-3 before rule-2
+			{ID: "rule-2", Type: 0, Index: 3},
+		}
+	}
+
+	server := mockACLOrderServerDynamic(t, siteID, rulesFunc, &modifyHits, &lastModifyBody)
+	defer server.Close()
+
+	c, err := client.NewClient(server.URL, "admin", "password", true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	r := &FirewallACLOrderResource{client: c}
+
+	ctx := context.Background()
+	plan := buildACLOrderPlan(t, r, siteID, 0, ruleIDs)
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	nullRaw := tftypes.NewValue(schemaResp.Schema.Type().TerraformType(ctx), nil)
+
+	req := resource.CreateRequest{Plan: plan}
+	resp := resource.CreateResponse{
+		State: tfsdk.State{Schema: schemaResp.Schema, Raw: nullRaw},
+	}
+
+	r.Create(ctx, req, &resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create should fail with diagnostic error when order never applies")
+	}
+
+	// Verify the right number of modifyIndex attempts were made.
+	if modifyHits != aclOrderMaxAttempts {
+		t.Errorf("modifyIndex called %d times, want %d (maxAttempts)", modifyHits, aclOrderMaxAttempts)
+	}
+
+	// Verify the error message contains the expected key phrases.
+	found := false
+	for _, d := range resp.Diagnostics.Errors() {
+		if d.Summary() == "ACL order not applied" {
+			found = true
+			detail := d.Detail()
+			if !strings.Contains(detail, "rule-1") || !strings.Contains(detail, "rule-2") || !strings.Contains(detail, "rule-3") {
+				t.Errorf("error detail missing rule IDs, got: %s", detail)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected 'ACL order not applied' error, got: %v", resp.Diagnostics)
+	}
+}
+
+// TestACLOrder_SucceedsAfterRetry: live list returns wrong order on attempt 1
+// but correct on attempt 2. Create must succeed.
+func TestACLOrder_SucceedsAfterRetry(t *testing.T) {
+	origAttempts := aclOrderMaxAttempts
+	origDelay := aclOrderRetryDelay
+	aclOrderMaxAttempts = 3
+	aclOrderRetryDelay = 0
+	defer func() {
+		aclOrderMaxAttempts = origAttempts
+		aclOrderRetryDelay = origDelay
+	}()
+
+	siteID := "site-succeeds-retry"
+	ruleIDs := []string{"rule-1", "rule-2", "rule-3"}
+
+	var modifyHits int
+	var lastModifyBody map[string]int
+	listCalls := 0
+
+	// rulesFunc returns wrong order on first GET, correct on subsequent GETs.
+	rulesFunc := func() []client.ACLRule {
+		listCalls++
+		if listCalls == 1 {
+			// First verify: wrong order.
+			return []client.ACLRule{
+				{ID: "rule-1", Type: 0, Index: 1},
+				{ID: "rule-3", Type: 0, Index: 2},
+				{ID: "rule-2", Type: 0, Index: 3},
+			}
+		}
+		// Subsequent: correct order.
+		return []client.ACLRule{
+			{ID: "rule-1", Type: 0, Index: 1},
+			{ID: "rule-2", Type: 0, Index: 2},
+			{ID: "rule-3", Type: 0, Index: 3},
+		}
+	}
+
+	server := mockACLOrderServerDynamic(t, siteID, rulesFunc, &modifyHits, &lastModifyBody)
+	defer server.Close()
+
+	c, err := client.NewClient(server.URL, "admin", "password", true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	r := &FirewallACLOrderResource{client: c}
+
+	ctx := context.Background()
+	plan := buildACLOrderPlan(t, r, siteID, 0, ruleIDs)
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	nullRaw := tftypes.NewValue(schemaResp.Schema.Type().TerraformType(ctx), nil)
+
+	req := resource.CreateRequest{Plan: plan}
+	resp := resource.CreateResponse{
+		State: tfsdk.State{Schema: schemaResp.Schema, Raw: nullRaw},
+	}
+
+	r.Create(ctx, req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create should succeed after retry, got errors: %v", resp.Diagnostics)
+	}
+	if modifyHits != 2 {
+		t.Errorf("modifyIndex called %d times, want 2 (initial + 1 retry)", modifyHits)
 	}
 }
 
