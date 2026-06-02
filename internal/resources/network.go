@@ -199,10 +199,12 @@ func (r *NetworkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Default:     booldefault.StaticBool(false),
 			},
 			"access_control_rule_enable": schema.BoolAttribute{
-				Description: "Enable access control rules (firewall ACLs) on this network.",
-				Optional:    true,
-				Computed:    true,
-				Default:     booldefault.StaticBool(false),
+				Description: "Enable access control rules (firewall ACLs) on this network. " +
+					"Omit from config — the Omada controller owns this flag and auto-enables " +
+					"it on networks referenced by gateway ACL rules. Setting a static default " +
+					"of false causes plan-time inconsistency when the controller returns true.",
+				Optional: true,
+				Computed: true,
 			},
 			"rate_limit_enable": schema.BoolAttribute{
 				Description: "Enable rate limiting on this network.",

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -333,5 +335,72 @@ func TestNetwork_BuildFromModel_DhcpDefaultsRespectExplicitValues(t *testing.T) 
 	}
 	if got.DHCPSettings.Dhcpns != "manual" {
 		t.Errorf("Dhcpns = %q, want \"manual\" (user-supplied, must not be overridden)", got.DHCPSettings.Dhcpns)
+	}
+}
+
+// TestNetwork_AccessControlRuleEnable_NoDefault asserts that the
+// access_control_rule_enable schema attribute carries NO static Default value.
+//
+// Background: booldefault.StaticBool(false) caused Terraform plan-time
+// inconsistency ("was cty.False, but now cty.True") on networks referenced by
+// gateway ACL rules, because the Omada controller auto-enables the flag as a
+// side-effect of ACL membership. Without a default the attribute is
+// Computed/Unknown at plan time — Terraform accepts whatever the post-apply
+// Read returns, which is the correct behaviour since the controller owns the
+// flag.
+func TestNetwork_AccessControlRuleEnable_NoDefault(t *testing.T) {
+	r := &NetworkResource{}
+	var resp resource.SchemaResponse
+	r.Schema(context.Background(), resource.SchemaRequest{}, &resp)
+
+	attr, ok := resp.Schema.Attributes["access_control_rule_enable"]
+	if !ok {
+		t.Fatal("access_control_rule_enable attribute not found in schema")
+	}
+
+	boolAttr, ok := attr.(schema.BoolAttribute)
+	if !ok {
+		t.Fatalf("access_control_rule_enable is not a schema.BoolAttribute, got %T", attr)
+	}
+
+	if boolAttr.Default != nil {
+		t.Errorf("access_control_rule_enable must have no Default (got %v); "+
+			"a static false default causes plan-time inconsistency when the "+
+			"Omada controller auto-enables the flag via ACL membership", boolAttr.Default)
+	}
+}
+
+// TestNetwork_AccessControlRuleEnable_ReadMapsControllerValue asserts that
+// applyNetworkToModel correctly propagates the controller-returned value for
+// access_control_rule_enable into state, regardless of the prior state value.
+//
+// This covers the post-apply refresh path: after the controller auto-enables
+// the flag (true), the Read call must store true in state — not the plan-time
+// false that would have caused inconsistency under the old static default.
+func TestNetwork_AccessControlRuleEnable_ReadMapsControllerValue(t *testing.T) {
+	ctx := context.Background()
+
+	// Simulate: controller returns true (flag auto-enabled by ACL membership).
+	n := &client.Network{
+		ID:                "net-servers",
+		Name:              "servers",
+		Purpose:           "interface",
+		Vlan:              10,
+		GatewaySubnet:     "10.10.10.1/24",
+		AccessControlRule: true, // controller-owned side-effect
+	}
+
+	// Prior state had false — this is what was planned under the old default.
+	state := &NetworkResourceModel{
+		AccessControlRule: types.BoolValue(false),
+	}
+
+	if err := applyNetworkToModel(ctx, state, n); err != nil {
+		t.Fatalf("applyNetworkToModel: %v", err)
+	}
+
+	if !state.AccessControlRule.ValueBool() {
+		t.Error("state.AccessControlRule should be true after controller returned true; " +
+			"Read must accept controller-owned value without inconsistency")
 	}
 }
