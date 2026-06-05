@@ -19,6 +19,7 @@ import (
 
 var _ resource.Resource = &SwitchPortResource{}
 var _ resource.ResourceWithImportState = &SwitchPortResource{}
+var _ resource.ResourceWithValidateConfig = &SwitchPortResource{}
 
 // SwitchPortResource manages a single switch port via PATCH
 // /switches/{mac}/ports/{port}. Compared to omada_device_switch (which
@@ -518,6 +519,64 @@ func (r *SwitchPortResource) ImportState(ctx context.Context, req resource.Impor
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// validateMirrorConfig performs plan-time validation of the mirror-related
+// fields. It is a pure function (no framework types) so it can be exercised
+// directly by unit tests without standing up a full provider.
+//
+// Rules:
+//  1. operation must be "" (not yet known), "switching", or "mirroring".
+//  2. mirrored_ports may only be set when operation == "mirroring".
+//  3. No source port may equal the destination port (destPort == model.Port).
+//  4. Every source port must be >= 1.
+func validateMirrorConfig(operation string, srcPorts []int64, destPort int64) error {
+	if operation != "" && operation != "switching" && operation != "mirroring" {
+		return fmt.Errorf("operation must be \"switching\" or \"mirroring\", got %q", operation)
+	}
+	if operation != "mirroring" {
+		if len(srcPorts) > 0 {
+			return fmt.Errorf("mirrored_ports may only be set when operation = \"mirroring\"")
+		}
+		return nil
+	}
+	for _, p := range srcPorts {
+		if p == destPort {
+			return fmt.Errorf("mirrored_ports must not include the destination port %d", destPort)
+		}
+		if p < 1 {
+			return fmt.Errorf("mirrored_ports values must be >= 1, got %d", p)
+		}
+	}
+	return nil
+}
+
+// ValidateConfig implements resource.ResourceWithValidateConfig. It provides
+// plan-time validation of the mirror configuration before any API call is made.
+func (r *SwitchPortResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var model SwitchPortResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &model)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// If mirrored_ports is unknown (e.g. a reference not yet resolved), skip
+	// validation — it will be re-run when the value is known.
+	if model.MirroredPorts.IsUnknown() {
+		return
+	}
+
+	var srcPorts []int64
+	if !model.MirroredPorts.IsNull() {
+		resp.Diagnostics.Append(model.MirroredPorts.ElementsAs(ctx, &srcPorts, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+
+	if err := validateMirrorConfig(model.Operation.ValueString(), srcPorts, model.Port.ValueInt64()); err != nil {
+		resp.Diagnostics.AddError("Invalid port mirror configuration", err.Error())
+	}
 }
 
 // int64RequiresReplace forces a resource recreation when the int64 attribute

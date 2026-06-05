@@ -495,6 +495,35 @@ func TestSwitchPort_BuildV2Body_SwitchingDropsMirroredPorts(t *testing.T) {
 	}
 }
 
+// TestValidateMirrorConfig covers all plan-time validation rules for the
+// mirror fields: operation one-of check, ports-only-when-mirroring, no
+// self-mirror (src == dest), and port values >= 1.
+func TestValidateMirrorConfig(t *testing.T) {
+	cases := []struct {
+		name      string
+		operation string
+		srcPorts  []int64
+		destPort  int64
+		wantErr   bool
+	}{
+		{"mirroring ok", "mirroring", []int64{1, 3}, 12, false},
+		{"switching with ports", "switching", []int64{1}, 12, true},
+		{"mirroring includes dest", "mirroring", []int64{1, 12}, 12, true},
+		{"switching empty ok", "switching", nil, 7, false},
+		{"empty operation ok", "", nil, 7, false},
+		{"invalid operation", "bogus", nil, 7, true},
+		{"mirroring zero port", "mirroring", []int64{0}, 12, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateMirrorConfig(c.operation, c.srcPorts, c.destPort)
+			if (err != nil) != c.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
 // TestSwitchPort_ApplyToModel_NullListsPreserved verifies the null-vs-empty
 // list preservation: state-null + API empty should remain null to avoid
 // perpetual diff.
