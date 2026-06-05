@@ -44,12 +44,12 @@ resource "omada_switch_port" "k8s_node" {
   device_mac = "AA-BB-CC-DD-EE-FF"
   port       = 5
 
-  name                   = "k8s-node-1"
-  profile_id             = omada_port_profile.access_trusted.id
+  name                    = "k8s-node-1"
+  profile_id              = omada_port_profile.access_trusted.id
   profile_override_enable = true
-  native_network_id      = omada_network.trusted.id
-  network_tags_setting   = 2 # access mode
-  speed                  = 5 # 1Gb FD
+  native_network_id       = omada_network.trusted.id
+  network_tags_setting    = 2 # access mode
+  speed                   = 5 # 1Gb FD
 }
 
 # Trunk port — no override, profile controls VLAN membership
@@ -59,6 +59,16 @@ resource "omada_switch_port" "uplink" {
   port       = 24
 
   profile_id = omada_port_profile.trunk_all.id
+}
+
+# Port mirroring (SPAN): mirror traffic from source ports 1,3,5,14,16 to
+# destination port 12 (e.g. feeding a network sensor / IDS NIC).
+resource "omada_switch_port" "sensor_mirror_dst" {
+  site_id        = omada_site.home.id
+  device_mac     = "B8-FB-B3-7F-45-C8"
+  port           = 12
+  operation      = "mirroring"
+  mirrored_ports = [1, 3, 5, 14, 16]
 }
 ```
 
@@ -73,9 +83,11 @@ resource "omada_switch_port" "uplink" {
 ### Optional
 
 - `disable` (Boolean) Administratively shut down the port. Default: `false`.
+- `mirrored_ports` (Set of Number) Source port numbers whose traffic is mirrored to this destination port. Only valid when `operation = "mirroring"`. Order-independent; the port itself must not be included in this set.
 - `name` (String) Friendly port name shown in the Omada UI.
 - `native_network_id` (String) Native (untagged / PVID) network ID for this port. Only honored when `profile_override_enable=true`.
 - `network_tags_setting` (Number) VLAN tagging mode: 0=general (controller default), 1=trunk, 2=access. Only honored when `profile_override_enable=true`.
+- `operation` (String) Port operation mode: `"switching"` (default) or `"mirroring"`. Set to `"mirroring"` on the destination port and supply `mirrored_ports` with the list of source port numbers.
 - `profile_id` (String) ID of the `omada_port_profile` to apply to this port.
 - `profile_override_enable` (Boolean) When true, this port uses the per-port VLAN fields instead of the assigned profile. Default: `false`.
 - `profile_vlan_override_enable` (Boolean) Per-port VLAN override enable. Automatically forced to `true` when `profile_override_enable=true` and `native_network_id` is set (required by access_\* profiles; omitting it returns controller error -39840). Computed from the controller on Read.
