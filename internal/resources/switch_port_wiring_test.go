@@ -151,6 +151,8 @@ func switchPortSchemaAttrTypes() map[string]tftypes.Type {
 		"voice_network_enable":         tftypes.Bool,
 		"voice_dscp_enable":            tftypes.Bool,
 		"speed":                        tftypes.Number,
+		"operation":                    tftypes.String,
+		"mirrored_ports":               tftypes.Set{ElementType: tftypes.Number},
 	}
 }
 
@@ -193,6 +195,8 @@ func buildSwitchPortPlan(t *testing.T, r *SwitchPortResource, siteID, mac string
 		"network_tags_setting": tftypes.NewValue(tftypes.Number, nil),
 		"tag_network_ids":      tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, nil),
 		"speed":                tftypes.NewValue(tftypes.Number, nil),
+		"operation":            tftypes.NewValue(tftypes.String, nil),
+		"mirrored_ports":       tftypes.NewValue(tftypes.Set{ElementType: tftypes.Number}, nil),
 	})
 
 	return tfsdk.Plan{
