@@ -2,11 +2,25 @@ package resources
 
 import (
 	"context"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+func TestSwitchPort_MirroredPortRefsToSet_OrderIndependent(t *testing.T) {
+	ctx := context.Background()
+	set := mirroredPortRefsToSet(ctx, []client.MirroredPortRef{{Port: 16}, {Port: 1}, {Port: 3}, {Port: 5}, {Port: 14}})
+	var got []int64
+	set.ElementsAs(ctx, &got, false)
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	want := []int64{1, 3, 5, 14, 16}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v want %v", got, want)
+	}
+}
 
 // TestSwitchPort_SpeedToLinkDuplex_Table verifies the speed→{linkSpeed,duplex}
 // mapping table covers all confirmed speed codes and gaps.

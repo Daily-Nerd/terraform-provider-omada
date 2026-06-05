@@ -2908,8 +2908,8 @@ func TestSwitchPortV2_MirrorFields_Marshal(t *testing.T) {
 	}
 }
 
-func TestSwitchPort_AllMirroredPorts_Unmarshal(t *testing.T) {
-	const raw = `{"port":12,"operation":"mirroring","allMirroredPorts":[16,1,3,5,14]}`
+func TestSwitchPort_MirroredPorts_Unmarshal(t *testing.T) {
+	const raw = `{"port":12,"operation":"mirroring","mirroredPorts":[{"port":16,"portName":"x"},{"port":1,"portName":"Port1"},{"port":3},{"port":5},{"port":14}]}`
 	var p SwitchPort
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -2917,8 +2917,11 @@ func TestSwitchPort_AllMirroredPorts_Unmarshal(t *testing.T) {
 	if p.Operation != "mirroring" {
 		t.Errorf("operation = %q", p.Operation)
 	}
-	if len(p.AllMirroredPorts) != 5 {
-		t.Errorf("allMirroredPorts = %v", p.AllMirroredPorts)
+	if len(p.MirroredPorts) != 5 {
+		t.Errorf("mirroredPorts = %v", p.MirroredPorts)
+	}
+	if p.MirroredPorts[0].Port != 16 {
+		t.Errorf("mirroredPorts[0].Port = %d, want 16", p.MirroredPorts[0].Port)
 	}
 }
 

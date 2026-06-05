@@ -325,6 +325,19 @@ func buildSwitchPortV2Body(ctx context.Context, m *SwitchPortResourceModel, diag
 	return body
 }
 
+// mirroredPortRefsToSet converts the per-switch GET mirroredPorts object array
+// into a Terraform types.Set of int64 port numbers. Order-independent: the set
+// type is inherently unordered, so terraform plan shows no drift regardless of
+// the order the controller returns ports.
+func mirroredPortRefsToSet(ctx context.Context, refs []client.MirroredPortRef) types.Set {
+	vals := make([]int64, 0, len(refs))
+	for _, r := range refs {
+		vals = append(vals, int64(r.Port))
+	}
+	set, _ := types.SetValueFrom(ctx, types.Int64Type, vals)
+	return set
+}
+
 // applySwitchPortToModel writes the API SwitchPort struct back into the
 // Terraform model. Preserves null vs empty-list semantics for
 // tag_network_ids and untag_network_ids.
@@ -340,6 +353,13 @@ func applySwitchPortToModel(ctx context.Context, m *SwitchPortResourceModel, p *
 	m.VoiceNetworkEnable = types.BoolValue(p.VoiceNetworkEnable)
 	m.VoiceDscpEnable = types.BoolValue(p.VoiceDscpEnable)
 	m.Speed = types.Int64Value(int64(p.Speed))
+
+	operation := p.Operation
+	if operation == "" {
+		operation = "switching"
+	}
+	m.Operation = types.StringValue(operation)
+	m.MirroredPorts = mirroredPortRefsToSet(ctx, p.MirroredPorts)
 
 	if len(p.TagNetworkIDs) == 0 && m.TagNetworkIDs.IsNull() {
 		m.TagNetworkIDs = types.ListNull(types.StringType)

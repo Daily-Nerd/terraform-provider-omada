@@ -2354,27 +2354,35 @@ type SwitchSNMP struct {
 	Contact  string `json:"contact"`
 }
 
+// MirroredPortRef is a single entry in the per-switch GET mirroredPorts array.
+// The per-switch read returns objects {port, portName} — not flat ints.
+// The write body (SwitchPortV2.MirroredPorts []int) uses flat ints; these are
+// two distinct wire shapes.
+type MirroredPortRef struct {
+	Port int `json:"port"`
+}
+
 // SwitchPort represents a port configuration on a switch.
 type SwitchPort struct {
-	ID                        string   `json:"id,omitempty"`
-	Port                      int      `json:"port"`
-	Name                      string   `json:"name"`
-	Disable                   bool     `json:"disable"`
-	Type                      int      `json:"type"`
-	MaxSpeed                  int      `json:"maxSpeed,omitempty"`
-	NativeNetworkID           string   `json:"nativeNetworkId,omitempty"`
-	NetworkTagsSetting        int      `json:"networkTagsSetting"`
-	TagNetworkIDs             []string `json:"tagNetworkIds"`
-	UntagNetworkIDs           []string `json:"untagNetworkIds"`
-	VoiceNetworkEnable        bool     `json:"voiceNetworkEnable"`
-	VoiceDscpEnable           bool     `json:"voiceDscpEnable"`
-	ProfileID                 string   `json:"profileId"`
-	ProfileName               string   `json:"profileName,omitempty"`
-	ProfileOverrideEnable     bool     `json:"profileOverrideEnable"`
-	ProfileVlanOverrideEnable bool     `json:"profileVlanOverrideEnable"`
-	Operation                 string   `json:"operation,omitempty"`
-	AllMirroredPorts          []int    `json:"allMirroredPorts,omitempty"`
-	Speed                     int      `json:"speed"`
+	ID                        string            `json:"id,omitempty"`
+	Port                      int               `json:"port"`
+	Name                      string            `json:"name"`
+	Disable                   bool              `json:"disable"`
+	Type                      int               `json:"type"`
+	MaxSpeed                  int               `json:"maxSpeed,omitempty"`
+	NativeNetworkID           string            `json:"nativeNetworkId,omitempty"`
+	NetworkTagsSetting        int               `json:"networkTagsSetting"`
+	TagNetworkIDs             []string          `json:"tagNetworkIds"`
+	UntagNetworkIDs           []string          `json:"untagNetworkIds"`
+	VoiceNetworkEnable        bool              `json:"voiceNetworkEnable"`
+	VoiceDscpEnable           bool              `json:"voiceDscpEnable"`
+	ProfileID                 string            `json:"profileId"`
+	ProfileName               string            `json:"profileName,omitempty"`
+	ProfileOverrideEnable     bool              `json:"profileOverrideEnable"`
+	ProfileVlanOverrideEnable bool              `json:"profileVlanOverrideEnable"`
+	Operation                 string            `json:"operation,omitempty"`
+	MirroredPorts             []MirroredPortRef `json:"mirroredPorts,omitempty"`
+	Speed                     int               `json:"speed"`
 }
 
 // SwitchPortV2 is the openapi/v1 PATCH body for a single switch port.
