@@ -2921,3 +2921,55 @@ func TestSwitchPort_AllMirroredPorts_Unmarshal(t *testing.T) {
 		t.Errorf("allMirroredPorts = %v", p.AllMirroredPorts)
 	}
 }
+
+// TestUpdateSwitchPortV2_SendsMirrorFields verifies that UpdateSwitchPortV2
+// serialises Operation and MirroredPorts into the outgoing PATCH body.
+// Pattern copied from TestUpdateSwitchPortV2_OpenAPIPathAndBody.
+func TestUpdateSwitchPortV2_SendsMirrorFields(t *testing.T) {
+	omadacID := "test-omadac-id"
+	siteID := "site-1"
+	mac := "aa:bb:cc:dd:ee:ff"
+	portNum := 12
+
+	openAPIPath := fmt.Sprintf("/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		omadacID, siteID, mac, portNum)
+
+	var captured string
+
+	switchCfg := SwitchConfig{
+		MAC:  mac,
+		Name: "test-switch",
+		Ports: []SwitchPort{
+			{Port: portNum, Name: "Port12"},
+		},
+	}
+
+	server := mockOpenAPIServer(t,
+		map[string]http.HandlerFunc{
+			openAPIPath: func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				captured = string(b)
+				json.NewEncoder(w).Encode(APIResponse{ErrorCode: 0, Msg: "Success."})
+			},
+		},
+		map[string]http.HandlerFunc{
+			fmt.Sprintf("/sites/%s/switches/%s", siteID, mac): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, switchCfg),
+				})
+			},
+		},
+	)
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	_, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum,
+		&SwitchPortV2{Name: "Port12", Operation: "mirroring", MirroredPorts: []int{1, 3, 5}})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !strings.Contains(captured, `"operation":"mirroring"`) || !strings.Contains(captured, `"mirroredPorts":[1,3,5]`) {
+		t.Errorf("PATCH body missing mirror fields: %s", captured)
+	}
+}
