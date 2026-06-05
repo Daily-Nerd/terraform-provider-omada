@@ -454,6 +454,47 @@ func TestSwitchPort_ApplyToModel(t *testing.T) {
 	}
 }
 
+// TestSwitchPort_BuildV2Body_Mirroring verifies that when operation=="mirroring"
+// the builder populates both Operation and MirroredPorts on the PATCH body.
+func TestSwitchPort_BuildV2Body_Mirroring(t *testing.T) {
+	ctx := context.Background()
+	ports, _ := types.SetValueFrom(ctx, types.Int64Type, []int64{1, 3, 5})
+	m := &SwitchPortResourceModel{
+		Port:          types.Int64Value(12),
+		Operation:     types.StringValue("mirroring"),
+		MirroredPorts: ports,
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, m, &errs)
+	if got.Operation != "mirroring" {
+		t.Errorf("Operation = %q", got.Operation)
+	}
+	if len(got.MirroredPorts) != 3 {
+		t.Errorf("MirroredPorts = %v", got.MirroredPorts)
+	}
+}
+
+// TestSwitchPort_BuildV2Body_SwitchingDropsMirroredPorts verifies that when
+// operation=="switching" the MirroredPorts slice is NOT forwarded, even if
+// the model contains ports (guard against accidental mirror activation).
+func TestSwitchPort_BuildV2Body_SwitchingDropsMirroredPorts(t *testing.T) {
+	ctx := context.Background()
+	ports, _ := types.SetValueFrom(ctx, types.Int64Type, []int64{1, 3})
+	m := &SwitchPortResourceModel{
+		Port:          types.Int64Value(7),
+		Operation:     types.StringValue("switching"),
+		MirroredPorts: ports, // present but must be ignored when not mirroring
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, m, &errs)
+	if got.Operation != "switching" {
+		t.Errorf("Operation = %q", got.Operation)
+	}
+	if len(got.MirroredPorts) != 0 {
+		t.Errorf("MirroredPorts should be empty for switching, got %v", got.MirroredPorts)
+	}
+}
+
 // TestSwitchPort_ApplyToModel_NullListsPreserved verifies the null-vs-empty
 // list preservation: state-null + API empty should remain null to avoid
 // perpetual diff.

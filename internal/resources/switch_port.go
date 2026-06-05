@@ -300,6 +300,27 @@ func buildSwitchPortV2Body(ctx context.Context, m *SwitchPortResourceModel, diag
 		body.TagIDs = ids
 	}
 
+	operation := m.Operation.ValueString()
+	if operation == "" {
+		operation = "switching"
+	}
+	body.Operation = operation
+
+	if operation == "mirroring" && !m.MirroredPorts.IsNull() && !m.MirroredPorts.IsUnknown() {
+		var ports []int64
+		d := m.MirroredPorts.ElementsAs(ctx, &ports, false)
+		if d.HasError() {
+			for _, e := range d.Errors() {
+				*diags = append(*diags, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
+			}
+			return nil
+		}
+		body.MirroredPorts = make([]int, 0, len(ports))
+		for _, p := range ports {
+			body.MirroredPorts = append(body.MirroredPorts, int(p))
+		}
+	}
+
 	return body
 }
 
