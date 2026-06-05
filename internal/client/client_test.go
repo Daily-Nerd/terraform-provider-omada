@@ -2892,3 +2892,32 @@ func TestDeleteIPGroup_IncludesTypeSegment(t *testing.T) {
 		t.Errorf("DELETE path = %q, want %q (missing type segment)", capturedPath, wantPath)
 	}
 }
+
+func TestSwitchPortV2_MirrorFields_Marshal(t *testing.T) {
+	body := SwitchPortV2{Name: "Port12", Operation: "mirroring", MirroredPorts: []int{1, 3, 5}}
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(b)
+	if !strings.Contains(got, `"operation":"mirroring"`) {
+		t.Errorf("missing operation in %s", got)
+	}
+	if !strings.Contains(got, `"mirroredPorts":[1,3,5]`) {
+		t.Errorf("missing mirroredPorts in %s", got)
+	}
+}
+
+func TestSwitchPort_AllMirroredPorts_Unmarshal(t *testing.T) {
+	const raw = `{"port":12,"operation":"mirroring","allMirroredPorts":[16,1,3,5,14]}`
+	var p SwitchPort
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.Operation != "mirroring" {
+		t.Errorf("operation = %q", p.Operation)
+	}
+	if len(p.AllMirroredPorts) != 5 {
+		t.Errorf("allMirroredPorts = %v", p.AllMirroredPorts)
+	}
+}

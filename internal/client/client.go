@@ -2373,6 +2373,7 @@ type SwitchPort struct {
 	ProfileOverrideEnable     bool     `json:"profileOverrideEnable"`
 	ProfileVlanOverrideEnable bool     `json:"profileVlanOverrideEnable"`
 	Operation                 string   `json:"operation,omitempty"`
+	AllMirroredPorts          []int    `json:"allMirroredPorts,omitempty"`
 	Speed                     int      `json:"speed"`
 }
 
@@ -2392,6 +2393,8 @@ type SwitchPortV2 struct {
 	VoiceNetworkEnable        bool     `json:"voiceNetworkEnable"`
 	LinkSpeed                 int      `json:"linkSpeed"`
 	Duplex                    int      `json:"duplex"`
+	Operation                 string   `json:"operation,omitempty"`
+	MirroredPorts             []int    `json:"mirroredPorts,omitempty"`
 }
 
 // SwitchServiceConfig is the payload for PUT /switches/{mac}/config/service.
