@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -47,6 +48,8 @@ type SwitchPortResourceModel struct {
 	VoiceNetworkEnable        types.Bool   `tfsdk:"voice_network_enable"`
 	VoiceDscpEnable           types.Bool   `tfsdk:"voice_dscp_enable"`
 	Speed                     types.Int64  `tfsdk:"speed"`
+	Operation                 types.String `tfsdk:"operation"`
+	MirroredPorts             types.Set    `tfsdk:"mirrored_ports"`
 }
 
 func NewSwitchPortResource() resource.Resource {
@@ -176,6 +179,17 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"— see GitHub issue #40 for the API discovery thread.",
 				Optional: true,
 				Computed: true,
+			},
+			"operation": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     stringdefault.StaticString("switching"),
+				Description: "Port role: \"switching\" (normal, default) or \"mirroring\" (this port is a SPAN destination).",
+			},
+			"mirrored_ports": schema.SetAttribute{
+				Optional:    true,
+				ElementType: types.Int64Type,
+				Description: "Source port numbers mirrored to this destination port. Only valid when operation = \"mirroring\". Order-independent.",
 			},
 		},
 	}
