@@ -2,8 +2,10 @@ package resources
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
@@ -82,16 +84,24 @@ func TestSwitchPort_BuildV2Body_AllFields(t *testing.T) {
 		t.Fatal("buildSwitchPortV2Body returned nil")
 	}
 
-	// Speed mapping: 5 → linkSpeed=3, duplex=2
-	if got.LinkSpeed != 3 {
-		t.Errorf("LinkSpeed = %d, want 3", got.LinkSpeed)
+	// Speed mapping: 5 → linkSpeed=3, duplex=2 (pointer fields)
+	if got.LinkSpeed == nil || *got.LinkSpeed != 3 {
+		ls := -1
+		if got.LinkSpeed != nil {
+			ls = *got.LinkSpeed
+		}
+		t.Errorf("LinkSpeed = %d, want 3", ls)
 	}
-	if got.Duplex != 2 {
-		t.Errorf("Duplex = %d, want 2", got.Duplex)
+	if got.Duplex == nil || *got.Duplex != 2 {
+		d := -1
+		if got.Duplex != nil {
+			d = *got.Duplex
+		}
+		t.Errorf("Duplex = %d, want 2", d)
 	}
 
-	// tagIds populated from TagNetworkIDs
-	if len(got.TagIDs) != 2 || got.TagIDs[0] != "net-1" || got.TagIDs[1] != "net-2" {
+	// tagIds populated from TagNetworkIDs (pointer field)
+	if got.TagIDs == nil || len(*got.TagIDs) != 2 || (*got.TagIDs)[0] != "net-1" || (*got.TagIDs)[1] != "net-2" {
 		t.Errorf("TagIDs = %v, want [net-1, net-2]", got.TagIDs)
 	}
 
@@ -105,8 +115,12 @@ func TestSwitchPort_BuildV2Body_AllFields(t *testing.T) {
 	if !got.ProfileOverrideEnable {
 		t.Error("ProfileOverrideEnable should be true")
 	}
-	if got.NetworkTagsSetting != 2 {
-		t.Errorf("NetworkTagsSetting = %d, want 2", got.NetworkTagsSetting)
+	if got.NetworkTagsSetting == nil || *got.NetworkTagsSetting != 2 {
+		v := -1
+		if got.NetworkTagsSetting != nil {
+			v = *got.NetworkTagsSetting
+		}
+		t.Errorf("NetworkTagsSetting = %d, want 2", v)
 	}
 	if got.NativeNetworkID != "net-trusted" {
 		t.Errorf("NativeNetworkID = %q, want net-trusted", got.NativeNetworkID)
@@ -128,9 +142,10 @@ func TestSwitchPort_BuildV2Body_AllFields(t *testing.T) {
 	}
 }
 
-// TestSwitchPort_BuildV2Body_NilTagsCoercedEmpty verifies that nil TagNetworkIDs
-// produces TagIDs=[] (not nil) to satisfy the controller's strict empty-array
-// requirement.
+// TestSwitchPort_BuildV2Body_NilTagsCoercedEmpty verifies that Null TagNetworkIDs
+// (types.ListNull — user explicitly cleared / not set) produces TagIDs=&[]string{}
+// which marshals as [], satisfying the controller's strict empty-array requirement.
+// Updated to use the new *[]string pointer type: nil=omit, &[]string{}=send [].
 func TestSwitchPort_BuildV2Body_NilTagsCoercedEmpty(t *testing.T) {
 	ctx := context.Background()
 	model := &SwitchPortResourceModel{
@@ -143,11 +158,11 @@ func TestSwitchPort_BuildV2Body_NilTagsCoercedEmpty(t *testing.T) {
 	if len(buildErrs) > 0 {
 		t.Fatalf("build errors: %v", buildErrs)
 	}
+	// Null → pointer must be non-nil (signals "send this"), pointing to empty slice.
 	if got.TagIDs == nil {
-		t.Error("TagIDs should be [] (non-nil empty slice), got nil")
-	}
-	if len(got.TagIDs) != 0 {
-		t.Errorf("TagIDs = %v, want empty []", got.TagIDs)
+		t.Error("TagIDs pointer should be non-nil (send []) for Null list; nil means omit")
+	} else if len(*got.TagIDs) != 0 {
+		t.Errorf("TagIDs = %v, want empty []", *got.TagIDs)
 	}
 }
 
@@ -221,14 +236,22 @@ func TestSwitchPortCreate_UsesOpenAPIPath(t *testing.T) {
 
 	// Assert V2 dialect: has linkSpeed/duplex, NOT speed as a top-level field.
 	// The struct type itself guarantees no port/disable/voiceDscpEnable fields.
-	if body.LinkSpeed != 3 {
-		t.Errorf("Create: LinkSpeed = %d, want 3 (speed=5 → 1Gb FD)", body.LinkSpeed)
+	if body.LinkSpeed == nil || *body.LinkSpeed != 3 {
+		ls := -1
+		if body.LinkSpeed != nil {
+			ls = *body.LinkSpeed
+		}
+		t.Errorf("Create: LinkSpeed = %d, want 3 (speed=5 → 1Gb FD)", ls)
 	}
-	if body.Duplex != 2 {
-		t.Errorf("Create: Duplex = %d, want 2 (full)", body.Duplex)
+	if body.Duplex == nil || *body.Duplex != 2 {
+		d := -1
+		if body.Duplex != nil {
+			d = *body.Duplex
+		}
+		t.Errorf("Create: Duplex = %d, want 2 (full)", d)
 	}
-	// TagIDs present (from TagNetworkIDs)
-	if len(body.TagIDs) != 1 || body.TagIDs[0] != "net-trusted" {
+	// TagIDs present (from TagNetworkIDs) — pointer dereference
+	if body.TagIDs == nil || len(*body.TagIDs) != 1 || (*body.TagIDs)[0] != "net-trusted" {
 		t.Errorf("Create: TagIDs = %v, want [net-trusted]", body.TagIDs)
 	}
 	// NativeNetworkID present (non-empty)
@@ -264,13 +287,26 @@ func TestSwitchPortUpdate_UsesOpenAPIPath(t *testing.T) {
 		t.Fatal("buildSwitchPortV2Body returned nil")
 	}
 
-	// Speed=0 (auto-neg) → linkSpeed=0, duplex=0.
-	if body.LinkSpeed != 0 || body.Duplex != 0 {
-		t.Errorf("Update: linkSpeed=%d duplex=%d, want (0,0) for auto-neg", body.LinkSpeed, body.Duplex)
+	// Speed=0 (auto-neg) → linkSpeed=0, duplex=0 (known, so pointers must be non-nil).
+	if body.LinkSpeed == nil || *body.LinkSpeed != 0 {
+		ls := -1
+		if body.LinkSpeed != nil {
+			ls = *body.LinkSpeed
+		}
+		t.Errorf("Update: linkSpeed=%d, want 0 for auto-neg", ls)
 	}
-	// TagIDs coerced to [] even when TagNetworkIDs is null.
+	if body.Duplex == nil || *body.Duplex != 0 {
+		d := -1
+		if body.Duplex != nil {
+			d = *body.Duplex
+		}
+		t.Errorf("Update: duplex=%d, want 0 for auto-neg", d)
+	}
+	// TagIDs: Null → pointer non-nil pointing to [].
 	if body.TagIDs == nil {
-		t.Error("Update: TagIDs should be [] not nil")
+		t.Error("Update: TagIDs pointer should be non-nil (send []) for Null list")
+	} else if len(*body.TagIDs) != 0 {
+		t.Errorf("Update: TagIDs should be empty [], got %v", *body.TagIDs)
 	}
 }
 
@@ -313,8 +349,9 @@ func TestSwitchPort_UntagComputedOnly(t *testing.T) {
 	// the design doc requires removing it; this comment is the sentinel.
 	// The test passes by construction if buildSwitchPortV2Body returns
 	// *client.SwitchPortV2 which has no UntagNetworkIDs field.
-	if got.LinkSpeed != 0 {
-		t.Errorf("speed=0 (default) should map to linkSpeed=0, got %d", got.LinkSpeed)
+	// Speed is unset (null/zero-value types.Int64) → LinkSpeed nil (omit).
+	if got.LinkSpeed != nil {
+		t.Errorf("speed unset → LinkSpeed should be nil (omit), got %d", *got.LinkSpeed)
 	}
 }
 
@@ -512,30 +549,212 @@ func TestSwitchPort_BuildV2Body_SwitchingDropsMirroredPorts(t *testing.T) {
 // TestValidateMirrorConfig covers all plan-time validation rules for the
 // mirror fields: operation one-of check, ports-only-when-mirroring, no
 // self-mirror (src == dest), and port values >= 1.
+// overrideEnable=false, overrideKnown=false means "not yet known" — the
+// override validation is skipped (Unknown is acceptable at plan time).
 func TestValidateMirrorConfig(t *testing.T) {
 	cases := []struct {
-		name      string
-		operation string
-		srcPorts  []int64
-		destPort  int64
-		wantErr   bool
+		name           string
+		operation      string
+		srcPorts       []int64
+		destPort       int64
+		overrideEnable bool
+		overrideKnown  bool
+		wantErr        bool
 	}{
-		{"mirroring ok", "mirroring", []int64{1, 3}, 12, false},
-		{"switching with ports", "switching", []int64{1}, 12, true},
-		{"mirroring includes dest", "mirroring", []int64{1, 12}, 12, true},
-		{"switching empty ok", "switching", nil, 7, false},
-		{"empty operation ok", "", nil, 7, false},
-		{"invalid operation", "bogus", nil, 7, true},
-		{"mirroring zero port", "mirroring", []int64{0}, 12, true},
+		{"mirroring ok", "mirroring", []int64{1, 3}, 12, false, false, false},
+		{"switching with ports", "switching", []int64{1}, 12, false, false, true},
+		{"mirroring includes dest", "mirroring", []int64{1, 12}, 12, false, false, true},
+		{"switching empty ok", "switching", nil, 7, false, false, false},
+		{"empty operation ok", "", nil, 7, false, false, false},
+		{"invalid operation", "bogus", nil, 7, false, false, true},
+		{"mirroring zero port", "mirroring", []int64{0}, 12, false, false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateMirrorConfig(c.operation, c.srcPorts, c.destPort)
+			err := validateMirrorConfig(c.operation, c.srcPorts, c.destPort, c.overrideEnable, c.overrideKnown)
 			if (err != nil) != c.wantErr {
 				t.Errorf("err = %v, wantErr %v", err, c.wantErr)
 			}
 		})
 	}
+}
+
+// =============================================================================
+// New TDD tests — Unknown/Null/Known field preservation (must fail before impl)
+// =============================================================================
+
+// TestSwitchPort_BuildV2Body_OmitsUnknownProfileID verifies that an Unknown
+// profile_id (Computed, not configured by user) results in ProfileID="" which
+// omitempty drops from the JSON body — so the controller preserves current.
+func TestSwitchPort_BuildV2Body_OmitsUnknownProfileID(t *testing.T) {
+	ctx := context.Background()
+	model := &SwitchPortResourceModel{
+		ProfileID:     types.StringUnknown(),
+		TagNetworkIDs: types.ListUnknown(types.StringType),
+		Speed:         types.Int64Unknown(),
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, model, &errs)
+	if len(errs) > 0 {
+		t.Fatalf("build errors: %v", errs)
+	}
+	if got == nil {
+		t.Fatal("nil body")
+	}
+	// With omitempty on ProfileID, an empty string is dropped.
+	// Marshal and verify absence.
+	data, _ := jsonMarshalBody(got)
+	if strings.Contains(data, `"profileId"`) {
+		t.Errorf("body should NOT contain profileId when Unknown, got: %s", data)
+	}
+}
+
+// TestSwitchPort_BuildV2Body_OmitsUnknownSpeed verifies that an Unknown speed
+// (Computed, not configured) results in nil LinkSpeed/Duplex pointers which
+// omitempty drops — so the controller keeps the current negotiated speed.
+func TestSwitchPort_BuildV2Body_OmitsUnknownSpeed(t *testing.T) {
+	ctx := context.Background()
+	model := &SwitchPortResourceModel{
+		Speed:         types.Int64Unknown(),
+		TagNetworkIDs: types.ListUnknown(types.StringType),
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, model, &errs)
+	if got == nil {
+		t.Fatal("nil body")
+	}
+	if got.LinkSpeed != nil {
+		t.Errorf("LinkSpeed should be nil (omit) when Speed is Unknown, got %v", *got.LinkSpeed)
+	}
+	if got.Duplex != nil {
+		t.Errorf("Duplex should be nil (omit) when Speed is Unknown, got %v", *got.Duplex)
+	}
+}
+
+// TestSwitchPort_BuildV2Body_OmitsUnknownTags verifies that an Unknown
+// tag_network_ids (Computed, not configured) results in nil TagIDs pointer
+// which omitempty drops — so the controller preserves current tagged VLANs.
+func TestSwitchPort_BuildV2Body_OmitsUnknownTags(t *testing.T) {
+	ctx := context.Background()
+	model := &SwitchPortResourceModel{
+		TagNetworkIDs: types.ListUnknown(types.StringType),
+		Speed:         types.Int64Unknown(),
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, model, &errs)
+	if got == nil {
+		t.Fatal("nil body")
+	}
+	if got.TagIDs != nil {
+		t.Errorf("TagIDs should be nil (omit) when Unknown, got %v", *got.TagIDs)
+	}
+}
+
+// TestSwitchPort_BuildV2Body_NullTagsSendsEmpty verifies that a Null
+// tag_network_ids (user explicitly cleared) results in TagIDs=&[]string{}
+// which marshals as [] — preserving existing NilTagsCoercedEmpty semantics.
+func TestSwitchPort_BuildV2Body_NullTagsSendsEmpty(t *testing.T) {
+	ctx := context.Background()
+	model := &SwitchPortResourceModel{
+		Speed:         types.Int64Value(0),
+		TagNetworkIDs: types.ListNull(types.StringType),
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, model, &errs)
+	if got == nil {
+		t.Fatal("nil body")
+	}
+	if got.TagIDs == nil {
+		t.Error("TagIDs pointer should be non-nil (send []) when Null")
+	} else if len(*got.TagIDs) != 0 {
+		t.Errorf("TagIDs should be empty slice, got %v", *got.TagIDs)
+	}
+}
+
+// TestSwitchPort_BuildV2Body_KnownSpeedSendsLinkDuplex verifies that a known
+// speed value (user configured) derives and sends the correct linkSpeed/duplex pair.
+func TestSwitchPort_BuildV2Body_KnownSpeedSendsLinkDuplex(t *testing.T) {
+	ctx := context.Background()
+	model := &SwitchPortResourceModel{
+		Speed:         types.Int64Value(5), // 1Gb FD → linkSpeed=3, duplex=2
+		TagNetworkIDs: types.ListUnknown(types.StringType),
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, model, &errs)
+	if got == nil {
+		t.Fatal("nil body")
+	}
+	if got.LinkSpeed == nil {
+		t.Fatal("LinkSpeed should be non-nil when Speed is known")
+	}
+	if *got.LinkSpeed != 3 {
+		t.Errorf("LinkSpeed = %d, want 3 (speed=5 → 1Gb FD)", *got.LinkSpeed)
+	}
+	if got.Duplex == nil {
+		t.Fatal("Duplex should be non-nil when Speed is known")
+	}
+	if *got.Duplex != 2 {
+		t.Errorf("Duplex = %d, want 2 (full duplex)", *got.Duplex)
+	}
+}
+
+// TestSwitchPort_BuildV2Body_MirroringForcesOverride verifies that
+// operation=mirroring always sets ProfileOverrideEnable=true in the body,
+// even when the model has it false/unknown.
+func TestSwitchPort_BuildV2Body_MirroringForcesOverride(t *testing.T) {
+	ctx := context.Background()
+	ports, _ := types.SetValueFrom(ctx, types.Int64Type, []int64{1, 3})
+	model := &SwitchPortResourceModel{
+		Port:                  types.Int64Value(12),
+		Operation:             types.StringValue("mirroring"),
+		MirroredPorts:         ports,
+		ProfileOverrideEnable: types.BoolValue(false), // explicitly false — must be overridden
+		TagNetworkIDs:         types.ListUnknown(types.StringType),
+		Speed:                 types.Int64Unknown(),
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, model, &errs)
+	if got == nil {
+		t.Fatal("nil body")
+	}
+	if !got.ProfileOverrideEnable {
+		t.Error("ProfileOverrideEnable should be forced true when operation=mirroring")
+	}
+}
+
+// TestValidateMirrorConfig_RejectsMirroringWithOverrideFalse verifies that
+// validateMirrorConfig rejects operation=mirroring with profileOverrideEnable
+// explicitly set to false.
+func TestValidateMirrorConfig_RejectsMirroringWithOverrideFalse(t *testing.T) {
+	err := validateMirrorConfig("mirroring", []int64{1, 3}, 12, false, true /* overrideKnown */)
+	if err == nil {
+		t.Error("expected error when operation=mirroring and profile_override_enable=false explicitly")
+	}
+}
+
+// TestValidateMirrorConfig_AllowsMirroringWithOverrideTrue verifies that
+// operation=mirroring with profileOverrideEnable=true is accepted.
+func TestValidateMirrorConfig_AllowsMirroringWithOverrideTrue(t *testing.T) {
+	err := validateMirrorConfig("mirroring", []int64{1, 3}, 12, true, true /* overrideKnown */)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestValidateMirrorConfig_AllowsMirroringWithOverrideUnknown verifies that
+// operation=mirroring with profileOverrideEnable unknown/unset is accepted
+// (it will be forced true by the builder).
+func TestValidateMirrorConfig_AllowsMirroringWithOverrideUnknown(t *testing.T) {
+	err := validateMirrorConfig("mirroring", []int64{1, 3}, 12, false, false /* overrideNotKnown */)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// jsonMarshalBody is a test helper that marshals a value to a JSON string.
+func jsonMarshalBody(body interface{}) (string, error) {
+	data, err := json.Marshal(body)
+	return string(data), err
 }
 
 // TestSwitchPort_ApplyToModel_NullListsPreserved verifies the null-vs-empty

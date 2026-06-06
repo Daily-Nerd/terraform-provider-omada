@@ -2390,19 +2390,26 @@ type SwitchPort struct {
 // from the v6 web UI; api/v2-only fields (port, disable, voiceDscpEnable,
 // type, maxSpeed) are intentionally absent. tagIds replaces tagNetworkIds;
 // untagNetworkIds is dropped (controller derives untag=[native] automatically).
+//
+// Pointer fields follow the Unknown/Null/Known rule:
+//   - nil   → omitted from JSON (Unknown — controller preserves current value)
+//   - &zero → sent as zero (Known or Null — explicit intent)
+//   - &v    → sent as v
+//
+// This prevents clobbering fields the user did not configure.
 type SwitchPortV2 struct {
-	Name                      string   `json:"name"`
-	ProfileID                 string   `json:"profileId"`
-	ProfileOverrideEnable     bool     `json:"profileOverrideEnable"`
-	ProfileVlanOverrideEnable bool     `json:"profileVlanOverrideEnable"`
-	NativeNetworkID           string   `json:"nativeNetworkId,omitempty"`
-	NetworkTagsSetting        int      `json:"networkTagsSetting"`
-	TagIDs                    []string `json:"tagIds"`
-	VoiceNetworkEnable        bool     `json:"voiceNetworkEnable"`
-	LinkSpeed                 int      `json:"linkSpeed"`
-	Duplex                    int      `json:"duplex"`
-	Operation                 string   `json:"operation,omitempty"`
-	MirroredPorts             []int    `json:"mirroredPorts,omitempty"`
+	Name                      string    `json:"name"`
+	ProfileID                 string    `json:"profileId,omitempty"`
+	ProfileOverrideEnable     bool      `json:"profileOverrideEnable"`
+	ProfileVlanOverrideEnable bool      `json:"profileVlanOverrideEnable"`
+	NativeNetworkID           string    `json:"nativeNetworkId,omitempty"`
+	NetworkTagsSetting        *int      `json:"networkTagsSetting,omitempty"`
+	TagIDs                    *[]string `json:"tagIds,omitempty"`
+	VoiceNetworkEnable        bool      `json:"voiceNetworkEnable"`
+	LinkSpeed                 *int      `json:"linkSpeed,omitempty"`
+	Duplex                    *int      `json:"duplex,omitempty"`
+	Operation                 string    `json:"operation,omitempty"`
+	MirroredPorts             []int     `json:"mirroredPorts,omitempty"`
 }
 
 // SwitchServiceConfig is the payload for PUT /switches/{mac}/config/service.
@@ -2584,19 +2591,22 @@ func (c *Client) UpdateSwitchPort(ctx context.Context, siteID, mac string, port 
 // mirroring UpdatePortProfileV2. Auth is via Csrf-Token header (no ?token=).
 //
 // The method:
-//  1. Forces ProfileVlanOverrideEnable=true when ProfileOverrideEnable is true
+//  1. Forces ProfileOverrideEnable=true when Operation=="mirroring" — the
+//     controller requires Custom mode (override) for mirroring to persist.
+//  2. Forces ProfileVlanOverrideEnable=true when ProfileOverrideEnable is true
 //     and NativeNetworkID is non-empty (access_* profiles require it; omitting
 //     it returns -39840).
-//  2. VLAN derivation for profiles with vlanConfigEnable=false: when override
+//  3. VLAN derivation for profiles with vlanConfigEnable=false: when override
 //     is off and no explicit NativeNetworkID is set, fetches the bound profile
 //     and copies its nativeNetworkId, networkTagsSetting, and tagNetworkIds
 //     into the body, setting profileVlanOverrideEnable=true. This prevents
 //     -39840 for access_*/trunk_* profiles whose VLAN the openapi surface
 //     cannot derive server-side. Best-effort: on profile fetch error the PATCH
 //     is sent as-is and the controller returns its own descriptive error.
-//  3. Coerces nil TagIDs to an empty slice so the controller receives [] not null.
-//  4. Retries on transient errorCode -1 with 500ms/1s/2s backoffs.
-//  5. Re-reads the port via the legacy api/v2 GET and returns the full
+//  4. Nil pointer fields (Unknown Terraform attrs) are omitted from JSON so
+//     the controller preserves current values — no nil-to-empty coercion.
+//  5. Retries on transient errorCode -1 with 500ms/1s/2s backoffs.
+//  6. Re-reads the port via the legacy api/v2 GET and returns the full
 //     SwitchPort struct (the openapi PATCH response is just {errorCode:0}).
 //
 // Read path stays api/v2 (ADR-5). The legacy UpdateSwitchPort remains intact.
@@ -2608,6 +2618,12 @@ func (c *Client) UpdateSwitchPortV2(ctx context.Context, siteID, mac string, por
 	// Serialize on the same gateway/provisioning lane as UpdatePortProfileV2.
 	c.createMu.Lock()
 	defer c.createMu.Unlock()
+
+	// Mirroring requires Custom (override) mode — force it so the operation
+	// persists after apply instead of reverting to Switching.
+	if body.Operation == "mirroring" {
+		body.ProfileOverrideEnable = true
+	}
 
 	// Force profileVlanOverrideEnable for access_* profiles. The controller
 	// silently requires it when profileOverrideEnable=true + nativeNetworkId
@@ -2628,20 +2644,21 @@ func (c *Client) UpdateSwitchPortV2(ctx context.Context, siteID, mac string, por
 		if prof, err := c.GetPortProfile(ctx, siteID, body.ProfileID); err == nil && !prof.VlanConfigEnable {
 			body.ProfileVlanOverrideEnable = true
 			body.NativeNetworkID = prof.NativeNetworkID
-			body.NetworkTagsSetting = prof.NetworkTagsSetting
+			nts := prof.NetworkTagsSetting
+			body.NetworkTagsSetting = &nts
 			if prof.TagNetworkIDs == nil {
-				body.TagIDs = []string{}
+				empty := []string{}
+				body.TagIDs = &empty
 			} else {
-				body.TagIDs = prof.TagNetworkIDs
+				body.TagIDs = &prof.TagNetworkIDs
 			}
 		}
 	}
 
-	// Defend against nil slice marshaling as JSON null — the controller
-	// is strict and expects [] when there are no tagged VLANs.
-	if body.TagIDs == nil {
-		body.TagIDs = []string{}
-	}
+	// NOTE: nil TagIDs pointer is intentional — it means "omit from JSON so
+	// the controller preserves current tagged VLANs". Do NOT coerce nil to [].
+	// The caller (buildSwitchPortV2Body) sets &[]string{} when the model is
+	// Null (user explicitly cleared), which marshals as [].
 
 	url := fmt.Sprintf("%s/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
 		c.baseURL, c.omadacID, siteID, mac, port)

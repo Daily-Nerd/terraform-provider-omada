@@ -11,6 +11,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -112,6 +114,9 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"Mutually exclusive with `profile_override_enable=true` + per-port VLAN fields.",
 				Optional: true,
 				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"profile_override_enable": schema.BoolAttribute{
 				Description: "When true, this port uses the per-port `native_network_id` / " +
@@ -136,6 +141,9 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"`profile_override_enable=true`.",
 				Optional: true,
 				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"network_tags_setting": schema.Int64Attribute{
 				Description: "VLAN tagging mode: 0=general (controller default), 1=trunk, 2=access. " +
@@ -144,6 +152,9 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"value is ignored — leave unset to track the controller's value cleanly.",
 				Optional: true,
 				Computed: true,
+				PlanModifiers: []planmodifier.Int64{
+					int64planmodifier.UseStateForUnknown(),
+				},
 			},
 			"tag_network_ids": schema.ListAttribute{
 				Description: "List of tagged VLAN network IDs. Only honored when " +
@@ -151,6 +162,9 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.StringType,
+				PlanModifiers: []planmodifier.List{
+					listplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"untag_network_ids": schema.ListAttribute{
 				Description: "Read-only list of untagged VLAN network IDs. The openapi/v1 write " +
@@ -159,6 +173,9 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"when upgrading from a prior version. This attribute is now Computed-only.",
 				Computed:    true,
 				ElementType: types.StringType,
+				PlanModifiers: []planmodifier.List{
+					listplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"voice_network_enable": schema.BoolAttribute{
 				Description: "Enable voice VLAN on this port. Requires controller voice VLAN configuration.",
@@ -180,6 +197,9 @@ func (r *SwitchPortResource) Schema(_ context.Context, _ resource.SchemaRequest,
 					"— see GitHub issue #40 for the API discovery thread.",
 				Optional: true,
 				Computed: true,
+				PlanModifiers: []planmodifier.Int64{
+					int64planmodifier.UseStateForUnknown(),
+				},
 			},
 			"operation": schema.StringAttribute{
 				Optional:    true,
@@ -262,34 +282,53 @@ func buildSwitchPortPatchPayload(ctx context.Context, m *SwitchPortResourceModel
 }
 
 // buildSwitchPortV2Body converts the Terraform model to the openapi/v1 PATCH
-// body (client.SwitchPortV2). The speed schema attribute is translated to the
-// {linkSpeed, duplex} pair required by the openapi dialect via
-// client.SpeedToLinkDuplex. nil TagNetworkIDs are coerced to an empty slice
-// here as a belt-and-suspenders measure (the client method also does it).
+// body (client.SwitchPortV2).
+//
+// Three-state rule for Optional+Computed attributes:
+//   - Unknown (Computed, user did not configure) → nil pointer / empty string
+//     with omitempty → field omitted from JSON → controller preserves current.
+//   - Null (user explicitly cleared) → pointer to zero/empty → field sent as
+//     zero/[] → controller applies the cleared value.
+//   - Known → pointer to value → field sent as configured.
 //
 // NOTE: profileVlanOverrideEnable is passed through from the model as-is.
 // The force logic (when profileOverrideEnable=true + nativeNetworkId set →
 // force profileVlanOverrideEnable=true) lives in UpdateSwitchPortV2, not here.
+// Override coupling for mirroring IS applied here so the body is self-consistent.
 func buildSwitchPortV2Body(ctx context.Context, m *SwitchPortResourceModel, diags *[]error) *client.SwitchPortV2 {
-	linkSpeed, duplex := client.SpeedToLinkDuplex(int(m.Speed.ValueInt64()))
-
 	body := &client.SwitchPortV2{
 		Name:                      m.Name.ValueString(),
-		ProfileID:                 m.ProfileID.ValueString(),
 		ProfileOverrideEnable:     m.ProfileOverrideEnable.ValueBool(),
 		ProfileVlanOverrideEnable: m.ProfileVlanOverrideEnable.ValueBool(),
-		NetworkTagsSetting:        int(m.NetworkTagsSetting.ValueInt64()),
 		VoiceNetworkEnable:        m.VoiceNetworkEnable.ValueBool(),
-		LinkSpeed:                 linkSpeed,
-		Duplex:                    duplex,
-		TagIDs:                    []string{},
 	}
 
+	// ProfileID: known & non-empty → set; Unknown/Null/empty → omitempty drops it.
+	if !m.ProfileID.IsUnknown() && m.ProfileID.ValueString() != "" {
+		body.ProfileID = m.ProfileID.ValueString()
+	}
+
+	// NativeNetworkID: unchanged — known & non-empty → set; omitempty handles rest.
 	if !m.NativeNetworkID.IsNull() && !m.NativeNetworkID.IsUnknown() && m.NativeNetworkID.ValueString() != "" {
 		body.NativeNetworkID = m.NativeNetworkID.ValueString()
 	}
 
-	if !m.TagNetworkIDs.IsNull() && !m.TagNetworkIDs.IsUnknown() {
+	// NetworkTagsSetting: Unknown → nil (omit); Known/Null → &value (send).
+	if !m.NetworkTagsSetting.IsUnknown() {
+		v := int(m.NetworkTagsSetting.ValueInt64())
+		body.NetworkTagsSetting = &v
+	}
+
+	// TagIDs (three-state):
+	//   Unknown → nil (omit — controller preserves current tagged VLANs)
+	//   Null    → &[]string{} (send [] — user explicitly cleared)
+	//   Known   → &ids
+	if m.TagNetworkIDs.IsUnknown() {
+		// nil — omit from JSON
+	} else if m.TagNetworkIDs.IsNull() {
+		empty := []string{}
+		body.TagIDs = &empty
+	} else {
 		var ids []string
 		d := m.TagNetworkIDs.ElementsAs(ctx, &ids, false)
 		if d.HasError() {
@@ -298,7 +337,14 @@ func buildSwitchPortV2Body(ctx context.Context, m *SwitchPortResourceModel, diag
 			}
 			return nil
 		}
-		body.TagIDs = ids
+		body.TagIDs = &ids
+	}
+
+	// LinkSpeed/Duplex: derive ONLY when speed is Known; Unknown → both nil (omit).
+	if !m.Speed.IsUnknown() && !m.Speed.IsNull() {
+		ls, dp := client.SpeedToLinkDuplex(int(m.Speed.ValueInt64()))
+		body.LinkSpeed = &ls
+		body.Duplex = &dp
 	}
 
 	operation := m.Operation.ValueString()
@@ -306,6 +352,11 @@ func buildSwitchPortV2Body(ctx context.Context, m *SwitchPortResourceModel, diag
 		operation = "switching"
 	}
 	body.Operation = operation
+
+	// Override coupling: mirroring requires profileOverrideEnable=true.
+	if operation == "mirroring" {
+		body.ProfileOverrideEnable = true
+	}
 
 	if operation == "mirroring" && !m.MirroredPorts.IsNull() && !m.MirroredPorts.IsUnknown() {
 		var ports []int64
@@ -550,7 +601,13 @@ func (r *SwitchPortResource) ImportState(ctx context.Context, req resource.Impor
 //  2. mirrored_ports may only be set when operation == "mirroring".
 //  3. No source port may equal the destination port (destPort == model.Port).
 //  4. Every source port must be >= 1.
-func validateMirrorConfig(operation string, srcPorts []int64, destPort int64) error {
+//  5. operation == "mirroring" with profile_override_enable explicitly false
+//     is rejected — mirroring requires override=true (forced by the builder
+//     when unknown/unset, but explicit false is a user error).
+//
+// overrideEnable: the current value of profile_override_enable.
+// overrideKnown:  true when the value is Known (not Null/Unknown).
+func validateMirrorConfig(operation string, srcPorts []int64, destPort int64, overrideEnable bool, overrideKnown bool) error {
 	if operation != "" && operation != "switching" && operation != "mirroring" {
 		return fmt.Errorf("operation must be \"switching\" or \"mirroring\", got %q", operation)
 	}
@@ -559,6 +616,11 @@ func validateMirrorConfig(operation string, srcPorts []int64, destPort int64) er
 			return fmt.Errorf("mirrored_ports may only be set when operation = \"mirroring\"")
 		}
 		return nil
+	}
+	// Reject explicitly false override with mirroring — the builder forces true
+	// only when Unknown, so a Known false would survive to the API and break it.
+	if overrideKnown && !overrideEnable {
+		return fmt.Errorf("operation \"mirroring\" requires profile_override_enable = true (or unset — it will be forced true automatically)")
 	}
 	for _, p := range srcPorts {
 		if p == destPort {
@@ -594,7 +656,11 @@ func (r *SwitchPortResource) ValidateConfig(ctx context.Context, req resource.Va
 		}
 	}
 
-	if err := validateMirrorConfig(model.Operation.ValueString(), srcPorts, model.Port.ValueInt64()); err != nil {
+	// Determine if profile_override_enable is known (not Unknown/Null) and its value.
+	overrideKnown := !model.ProfileOverrideEnable.IsUnknown() && !model.ProfileOverrideEnable.IsNull()
+	overrideEnable := model.ProfileOverrideEnable.ValueBool()
+
+	if err := validateMirrorConfig(model.Operation.ValueString(), srcPorts, model.Port.ValueInt64(), overrideEnable, overrideKnown); err != nil {
 		resp.Diagnostics.AddError("Invalid port mirror configuration", err.Error())
 	}
 }

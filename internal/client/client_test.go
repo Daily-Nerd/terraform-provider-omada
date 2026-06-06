@@ -2223,13 +2223,11 @@ func TestUpdateSwitchPortV2_OpenAPIPathAndBody(t *testing.T) {
 		t.Error("Csrf-Token header was empty; doOpenAPIRequest should set it")
 	}
 
-	// Assert nil TagIDs coerced to empty slice (marshals as [] not null).
-	if capturedBody.TagIDs == nil {
-		t.Error("TagIDs should be coerced to [] before sending, got nil")
-	}
-	if len(capturedBody.TagIDs) != 0 {
-		t.Errorf("TagIDs = %v, want []", capturedBody.TagIDs)
-	}
+	// nil TagIDs is left nil (omitted from JSON) — no coercion at the client layer.
+	// The caller (buildSwitchPortV2Body) is responsible for sending &[]string{} when
+	// the model is Null (user explicitly cleared). Nil means "preserve current".
+	// We just verify the body was decoded without error (capturedBody is a SwitchPortV2).
+	_ = capturedBody // TagIDs nil is intentional — no assertion needed here
 
 	// Assert ProfileVlanOverrideEnable forced true (override=true + nativeNetworkId set).
 	if !capturedBody.ProfileVlanOverrideEnable {
@@ -2271,7 +2269,8 @@ func TestUpdateSwitchPortV2_ErrorSurfacing(t *testing.T) {
 	defer server.Close()
 	c := newTestClient(t, server)
 
-	body := &SwitchPortV2{Name: "port-3", TagIDs: []string{}}
+	empty := []string{}
+	body := &SwitchPortV2{Name: "port-3", TagIDs: &empty}
 	_, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum, body)
 	if err == nil {
 		t.Fatal("expected error from UpdateSwitchPortV2 when controller returns -39840, got nil")
@@ -2328,7 +2327,8 @@ func TestUpdateSwitchPortV2_TransientRetry(t *testing.T) {
 	defer server.Close()
 	c := newTestClient(t, server)
 
-	body := &SwitchPortV2{Name: "port-3", TagIDs: []string{}}
+	empty := []string{}
+	body := &SwitchPortV2{Name: "port-3", TagIDs: &empty}
 	_, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum, body)
 	if err != nil {
 		t.Fatalf("UpdateSwitchPortV2 (retry): %v", err)
@@ -2521,8 +2521,12 @@ func TestUpdateSwitchPortV2_VlanDerivation_VlanConfigDisabled(t *testing.T) {
 	if capturedBody.NativeNetworkID != "net-iot" {
 		t.Errorf("NativeNetworkID = %q, want %q", capturedBody.NativeNetworkID, "net-iot")
 	}
-	if capturedBody.NetworkTagsSetting != 2 {
-		t.Errorf("NetworkTagsSetting = %d, want 2", capturedBody.NetworkTagsSetting)
+	if capturedBody.NetworkTagsSetting == nil || *capturedBody.NetworkTagsSetting != 2 {
+		v := -1
+		if capturedBody.NetworkTagsSetting != nil {
+			v = *capturedBody.NetworkTagsSetting
+		}
+		t.Errorf("NetworkTagsSetting = %d, want 2 (from VLAN derivation)", v)
 	}
 
 	// Re-read should still succeed.
@@ -2922,6 +2926,158 @@ func TestSwitchPort_MirroredPorts_Unmarshal(t *testing.T) {
 	}
 	if p.MirroredPorts[0].Port != 16 {
 		t.Errorf("mirroredPorts[0].Port = %d, want 16", p.MirroredPorts[0].Port)
+	}
+}
+
+// =============================================================================
+// SwitchPortV2 pointer-field omit/send tests (TDD: preserve unconfigured)
+// =============================================================================
+
+// TestSwitchPortV2_MirrorPatch_OmitsNilFieldsContainsOverride verifies that a
+// mirror PATCH body with nil LinkSpeed/TagIDs omits those fields from JSON, and
+// the body contains "profileOverrideEnable":true + "operation":"mirroring".
+func TestSwitchPortV2_MirrorPatch_OmitsNilFieldsContainsOverride(t *testing.T) {
+	// Mirror body with intentionally nil LinkSpeed, TagIDs, NetworkTagsSetting.
+	body := &SwitchPortV2{
+		Name:                  "Port12",
+		ProfileOverrideEnable: true,
+		Operation:             "mirroring",
+		MirroredPorts:         []int{1, 3, 5},
+		// LinkSpeed, Duplex, TagIDs, NetworkTagsSetting intentionally nil → omit.
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	bodyStr := string(data)
+
+	// Must contain override and operation.
+	if !strings.Contains(bodyStr, `"profileOverrideEnable":true`) {
+		t.Errorf("body missing profileOverrideEnable:true — got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"operation":"mirroring"`) {
+		t.Errorf("body missing operation:mirroring — got: %s", bodyStr)
+	}
+
+	// Must NOT contain nil pointer fields (omitempty drops them).
+	if strings.Contains(bodyStr, `"profileId"`) {
+		t.Errorf("body should omit profileId when empty — got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"linkSpeed"`) {
+		t.Errorf("body should omit linkSpeed when nil — got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"duplex"`) {
+		t.Errorf("body should omit duplex when nil — got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"tagIds"`) {
+		t.Errorf("body should omit tagIds when nil — got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"networkTagsSetting"`) {
+		t.Errorf("body should omit networkTagsSetting when nil — got: %s", bodyStr)
+	}
+}
+
+// TestSwitchPortV2_NilSpeedOmitFromJSON verifies that a normal update with
+// nil LinkSpeed/Duplex omits those fields from the marshaled JSON body.
+func TestSwitchPortV2_NilSpeedOmitFromJSON(t *testing.T) {
+	body := &SwitchPortV2{
+		Name:      "Port7",
+		Operation: "switching",
+		// LinkSpeed and Duplex nil → omit.
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	bodyStr := string(data)
+
+	if strings.Contains(bodyStr, `"linkSpeed"`) {
+		t.Errorf("body should omit linkSpeed when nil — got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"duplex"`) {
+		t.Errorf("body should omit duplex when nil — got: %s", bodyStr)
+	}
+}
+
+// TestSwitchPortV2_NonNilSpeedZeroIncluded verifies that an explicit &0 speed
+// (auto-neg) IS included in the JSON body — nil vs &0 is the distinction.
+func TestSwitchPortV2_NonNilSpeedZeroIncluded(t *testing.T) {
+	zero := 0
+	body := &SwitchPortV2{
+		Name:      "Port7",
+		Operation: "switching",
+		LinkSpeed: &zero,
+		Duplex:    &zero,
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	bodyStr := string(data)
+
+	if !strings.Contains(bodyStr, `"linkSpeed":0`) {
+		t.Errorf("body should contain linkSpeed:0 when &0 — got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"duplex":0`) {
+		t.Errorf("body should contain duplex:0 when &0 — got: %s", bodyStr)
+	}
+}
+
+// TestUpdateSwitchPortV2_MirroringForcesProfileOverride verifies that
+// UpdateSwitchPortV2 sets ProfileOverrideEnable=true when the body has
+// Operation=="mirroring", regardless of what the caller passed.
+func TestUpdateSwitchPortV2_MirroringForcesProfileOverride(t *testing.T) {
+	omadacID := "test-omadac-id"
+	siteID := "site-1"
+	mac := "aa:bb:cc:dd:ee:ff"
+	portNum := 12
+
+	openAPIPath := fmt.Sprintf("/openapi/v1/%s/sites/%s/switches/%s/ports/%d",
+		omadacID, siteID, mac, portNum)
+
+	var captured string
+
+	switchCfg := SwitchConfig{
+		MAC:  mac,
+		Name: "test-switch",
+		Ports: []SwitchPort{
+			{Port: portNum, Name: "Port12", Operation: "mirroring"},
+		},
+	}
+
+	server := mockOpenAPIServer(t,
+		map[string]http.HandlerFunc{
+			openAPIPath: func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				captured = string(b)
+				json.NewEncoder(w).Encode(APIResponse{ErrorCode: 0, Msg: "Success."})
+			},
+		},
+		map[string]http.HandlerFunc{
+			fmt.Sprintf("/sites/%s/switches/%s", siteID, mac): func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(APIResponse{
+					ErrorCode: 0,
+					Result:    mustMarshal(t, switchCfg),
+				})
+			},
+		},
+	)
+	defer server.Close()
+	c := newTestClient(t, server)
+
+	// Caller passes ProfileOverrideEnable=false — UpdateSwitchPortV2 must correct it.
+	_, err := c.UpdateSwitchPortV2(context.Background(), siteID, mac, portNum,
+		&SwitchPortV2{
+			Name:                  "Port12",
+			Operation:             "mirroring",
+			ProfileOverrideEnable: false, // intentionally wrong — must be forced true
+			MirroredPorts:         []int{1, 3},
+		})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !strings.Contains(captured, `"profileOverrideEnable":true`) {
+		t.Errorf("PATCH body should have profileOverrideEnable:true for mirroring, got: %s", captured)
 	}
 }
 
