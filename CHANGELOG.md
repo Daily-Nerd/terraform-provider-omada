@@ -2,6 +2,30 @@
 
 > **Fork point.** This changelog continues from `emanuelbesliu/terraform-provider-tplink-omada` v2.1.1. The Daily-Nerd fork resets versioning to `0.x.y` to signal a different lineage. Upstream history is preserved below for reference.
 
+## [1.0.0](https://github.com/Daily-Nerd/terraform-provider-omada/compare/v0.2.0...v1.0.0) (2026-06-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **device_switch:** `omada_device_switch.ports[]` is now read-only. Manage individual ports with the `omada_switch_port` resource instead. Configs that previously set port fields under `device_switch.ports[]` must move those to `omada_switch_port` resources.
+* **switch_port:** untag_network_ids is now Computed-only; the controller derives it from the native VLAN. Remove it from existing configurations.
+
+### Features
+
+* **device_switch:** make ports read-only, remove dual-write path ([#63](https://github.com/Daily-Nerd/terraform-provider-omada/issues/63)) ([dd97128](https://github.com/Daily-Nerd/terraform-provider-omada/commit/dd971280076d37427f9f14880d15e52253085bdd))
+* **firewall_acl:** PUT update + omada_firewall_acl_order for declarative ordering ([#57](https://github.com/Daily-Nerd/terraform-provider-omada/issues/57)) ([c883481](https://github.com/Daily-Nerd/terraform-provider-omada/commit/c8834812502ba3eb176c1dcfa93e08d4074899f0))
+* **network:** force-provision gateway after openapi/v1 interface create ([#50](https://github.com/Daily-Nerd/terraform-provider-omada/issues/50)) ([e2872eb](https://github.com/Daily-Nerd/terraform-provider-omada/commit/e2872eb68697296414ec5f7491621056a57216c8))
+* **network:** surface dhcpns1/dhcpns2 as dhcp_dns_primary/secondary ([#52](https://github.com/Daily-Nerd/terraform-provider-omada/issues/52)) ([4b913be](https://github.com/Daily-Nerd/terraform-provider-omada/commit/4b913beef45ef9e068fdc602c40bfbc27670071a))
+* **switch_port:** configure switch port mirroring (operation + mirrored_ports) ([#61](https://github.com/Daily-Nerd/terraform-provider-omada/issues/61)) ([20d43e5](https://github.com/Daily-Nerd/terraform-provider-omada/commit/20d43e5e8fcc385f3f8e3d82aa1fec7543be0bbb))
+* **switch_port:** route writes through openapi/v1 with per-port VLAN derivation ([#55](https://github.com/Daily-Nerd/terraform-provider-omada/issues/55)) ([4f28238](https://github.com/Daily-Nerd/terraform-provider-omada/commit/4f28238cbce74b676b55bce0da1a3c8beadec20d)), closes [#54](https://github.com/Daily-Nerd/terraform-provider-omada/issues/54)
+
+
+### Bug Fixes
+
+* **client:** serialize openapi/v1 network creates + retry on -1 ([#49](https://github.com/Daily-Nerd/terraform-provider-omada/issues/49)) ([7e027c1](https://github.com/Daily-Nerd/terraform-provider-omada/commit/7e027c1d9d2b530f02f77ef64dde81181f6e2ec7))
+* **port_profile:** route Update through openapi/v2 to unblock -33854 ([#53](https://github.com/Daily-Nerd/terraform-provider-omada/issues/53)) ([3d6b779](https://github.com/Daily-Nerd/terraform-provider-omada/commit/3d6b77930506ae2443c922557f025d838fc4b0a5))
+* **switch_port:** preserve unconfigured fields on write; couple mirroring with override ([#62](https://github.com/Daily-Nerd/terraform-provider-omada/issues/62)) ([bfb24f0](https://github.com/Daily-Nerd/terraform-provider-omada/commit/bfb24f044894503ebe268c287a1acb98e923b5d6))
+
 ## [Unreleased]
 
 ### BREAKING CHANGES
