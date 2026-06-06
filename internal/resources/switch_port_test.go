@@ -149,9 +149,12 @@ func TestSwitchPort_BuildV2Body_AllFields(t *testing.T) {
 func TestSwitchPort_BuildV2Body_NilTagsCoercedEmpty(t *testing.T) {
 	ctx := context.Background()
 	model := &SwitchPortResourceModel{
-		Speed:           types.Int64Value(0),
-		TagNetworkIDs:   types.ListNull(types.StringType),
-		UntagNetworkIDs: types.ListNull(types.StringType),
+		// Override on — per-port VLAN fields (incl. tags) are only sent when the
+		// port overrides its profile; that is the only context where Null→[] applies.
+		ProfileOverrideEnable: types.BoolValue(true),
+		Speed:                 types.Int64Value(0),
+		TagNetworkIDs:         types.ListNull(types.StringType),
+		UntagNetworkIDs:       types.ListNull(types.StringType),
 	}
 	var buildErrs []error
 	got := buildSwitchPortV2Body(ctx, model, &buildErrs)
@@ -302,11 +305,16 @@ func TestSwitchPortUpdate_UsesOpenAPIPath(t *testing.T) {
 		}
 		t.Errorf("Update: duplex=%d, want 0 for auto-neg", d)
 	}
-	// TagIDs: Null → pointer non-nil pointing to [].
-	if body.TagIDs == nil {
-		t.Error("Update: TagIDs pointer should be non-nil (send []) for Null list")
-	} else if len(*body.TagIDs) != 0 {
-		t.Errorf("Update: TagIDs should be empty [], got %v", *body.TagIDs)
+	// override is OFF here (profile-following trunk port) → per-port VLAN must be
+	// omitted entirely so the profile governs; sending tags here would risk -33837.
+	if body.TagIDs != nil {
+		t.Errorf("Update: TagIDs should be omitted (nil) when override is off, got %v", *body.TagIDs)
+	}
+	if body.NativeNetworkID != "" {
+		t.Errorf("Update: NativeNetworkID should be omitted when override is off, got %q", body.NativeNetworkID)
+	}
+	if body.NetworkTagsSetting != nil {
+		t.Errorf("Update: NetworkTagsSetting should be omitted when override is off, got %d", *body.NetworkTagsSetting)
 	}
 }
 
@@ -656,8 +664,9 @@ func TestSwitchPort_BuildV2Body_OmitsUnknownTags(t *testing.T) {
 func TestSwitchPort_BuildV2Body_NullTagsSendsEmpty(t *testing.T) {
 	ctx := context.Background()
 	model := &SwitchPortResourceModel{
-		Speed:         types.Int64Value(0),
-		TagNetworkIDs: types.ListNull(types.StringType),
+		ProfileOverrideEnable: types.BoolValue(true), // Null→[] only applies under override
+		Speed:                 types.Int64Value(0),
+		TagNetworkIDs:         types.ListNull(types.StringType),
 	}
 	var errs []error
 	got := buildSwitchPortV2Body(ctx, model, &errs)
@@ -779,5 +788,83 @@ func TestSwitchPort_ApplyToModel_NullListsPreserved(t *testing.T) {
 	}
 	if !model.UntagNetworkIDs.IsNull() {
 		t.Error("UntagNetworkIDs should remain null")
+	}
+}
+
+// TestSwitchPort_BuildV2Body_OverrideOffOmitsVlanFields verifies the -33837 fix:
+// when profile_override_enable is false the per-port VLAN fields (native, tags,
+// network_tags_setting) are OMITTED even when known, so the profile governs and
+// no stale tag IDs are sent. Speed is independent and still emitted.
+func TestSwitchPort_BuildV2Body_OverrideOffOmitsVlanFields(t *testing.T) {
+	ctx := context.Background()
+	tagIDs, _ := types.ListValueFrom(ctx, types.StringType, []string{"stale-1", "stale-2"})
+	model := &SwitchPortResourceModel{
+		ProfileOverrideEnable: types.BoolValue(false),
+		NativeNetworkID:       types.StringValue("net-x"),
+		NetworkTagsSetting:    types.Int64Value(1),
+		TagNetworkIDs:         tagIDs,
+		Speed:                 types.Int64Value(5),
+	}
+	var errs []error
+	got := buildSwitchPortV2Body(ctx, model, &errs)
+	if got == nil {
+		t.Fatal("nil body")
+	}
+	if got.TagIDs != nil {
+		t.Errorf("TagIDs must be omitted when override off, got %v", *got.TagIDs)
+	}
+	if got.NativeNetworkID != "" {
+		t.Errorf("NativeNetworkID must be omitted when override off, got %q", got.NativeNetworkID)
+	}
+	if got.NetworkTagsSetting != nil {
+		t.Errorf("NetworkTagsSetting must be omitted when override off, got %d", *got.NetworkTagsSetting)
+	}
+	// Speed is not VLAN/profile-governed → still emitted.
+	if got.LinkSpeed == nil || *got.LinkSpeed != 3 {
+		t.Error("LinkSpeed should still be emitted when override off")
+	}
+}
+
+// TestSwitchPort_ApplyToModel_MirroredPortsNullWhenEmpty verifies the
+// "inconsistent result after apply" fix: a port with no mirror sources maps to a
+// Null set (not an empty set), matching a null config.
+func TestSwitchPort_ApplyToModel_MirroredPortsNullWhenEmpty(t *testing.T) {
+	ctx := context.Background()
+	port := &client.SwitchPort{Port: 8, Operation: "switching"}
+	model := &SwitchPortResourceModel{
+		TagNetworkIDs:   types.ListNull(types.StringType),
+		UntagNetworkIDs: types.ListNull(types.StringType),
+	}
+	if err := applySwitchPortToModel(ctx, model, port); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !model.MirroredPorts.IsNull() {
+		t.Errorf("MirroredPorts must be Null for a non-mirror port, got %v", model.MirroredPorts)
+	}
+}
+
+// TestSwitchPort_ApplyToModel_MirroredPortsPopulated verifies a mirror port maps
+// its source ports into a non-null set.
+func TestSwitchPort_ApplyToModel_MirroredPortsPopulated(t *testing.T) {
+	ctx := context.Background()
+	port := &client.SwitchPort{
+		Port:          12,
+		Operation:     "mirroring",
+		MirroredPorts: []client.MirroredPortRef{{Port: 1}, {Port: 3}, {Port: 5}},
+	}
+	model := &SwitchPortResourceModel{
+		TagNetworkIDs:   types.ListNull(types.StringType),
+		UntagNetworkIDs: types.ListNull(types.StringType),
+	}
+	if err := applySwitchPortToModel(ctx, model, port); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if model.MirroredPorts.IsNull() {
+		t.Fatal("MirroredPorts must be non-null for a mirror port")
+	}
+	var ports []int64
+	model.MirroredPorts.ElementsAs(ctx, &ports, false)
+	if len(ports) != 3 {
+		t.Errorf("MirroredPorts = %v, want 3 elements", ports)
 	}
 }

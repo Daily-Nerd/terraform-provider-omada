@@ -296,11 +296,22 @@ func buildSwitchPortPatchPayload(ctx context.Context, m *SwitchPortResourceModel
 // force profileVlanOverrideEnable=true) lives in UpdateSwitchPortV2, not here.
 // Override coupling for mirroring IS applied here so the body is self-consistent.
 func buildSwitchPortV2Body(ctx context.Context, m *SwitchPortResourceModel, diags *[]error) *client.SwitchPortV2 {
+	operation := m.Operation.ValueString()
+	if operation == "" {
+		operation = "switching"
+	}
+	// Effective override: mirroring requires Custom mode (the controller only
+	// exposes the Operation selector under profileOverrideEnable=true), so a
+	// mirror port is always overriding. Computed up front because the per-port
+	// VLAN fields below are gated on it.
+	effectiveOverride := m.ProfileOverrideEnable.ValueBool() || operation == "mirroring"
+
 	body := &client.SwitchPortV2{
 		Name:                      m.Name.ValueString(),
-		ProfileOverrideEnable:     m.ProfileOverrideEnable.ValueBool(),
+		ProfileOverrideEnable:     effectiveOverride,
 		ProfileVlanOverrideEnable: m.ProfileVlanOverrideEnable.ValueBool(),
 		VoiceNetworkEnable:        m.VoiceNetworkEnable.ValueBool(),
+		Operation:                 operation,
 	}
 
 	// ProfileID: known & non-empty → set; Unknown/Null/empty → omitempty drops it.
@@ -308,54 +319,51 @@ func buildSwitchPortV2Body(ctx context.Context, m *SwitchPortResourceModel, diag
 		body.ProfileID = m.ProfileID.ValueString()
 	}
 
-	// NativeNetworkID: unchanged — known & non-empty → set; omitempty handles rest.
-	if !m.NativeNetworkID.IsNull() && !m.NativeNetworkID.IsUnknown() && m.NativeNetworkID.ValueString() != "" {
-		body.NativeNetworkID = m.NativeNetworkID.ValueString()
-	}
-
-	// NetworkTagsSetting: Unknown → nil (omit); Known/Null → &value (send).
-	if !m.NetworkTagsSetting.IsUnknown() {
-		v := int(m.NetworkTagsSetting.ValueInt64())
-		body.NetworkTagsSetting = &v
-	}
-
-	// TagIDs (three-state):
-	//   Unknown → nil (omit — controller preserves current tagged VLANs)
-	//   Null    → &[]string{} (send [] — user explicitly cleared)
-	//   Known   → &ids
-	if m.TagNetworkIDs.IsUnknown() {
-		// nil — omit from JSON
-	} else if m.TagNetworkIDs.IsNull() {
-		empty := []string{}
-		body.TagIDs = &empty
-	} else {
-		var ids []string
-		d := m.TagNetworkIDs.ElementsAs(ctx, &ids, false)
-		if d.HasError() {
-			for _, e := range d.Errors() {
-				*diags = append(*diags, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
-			}
-			return nil
+	// Per-port VLAN fields (native / tagged / tag-mode) only matter when the port
+	// overrides its profile. When override is OFF the profile governs VLAN config,
+	// and sending per-port VLAN — especially tag IDs read back into state that may
+	// be stale — makes the controller reject the write with -33837. So gate these
+	// on the effective override; otherwise omit them and let the profile drive.
+	if effectiveOverride {
+		// NativeNetworkID: known & non-empty → set; omitempty handles the rest.
+		if !m.NativeNetworkID.IsNull() && !m.NativeNetworkID.IsUnknown() && m.NativeNetworkID.ValueString() != "" {
+			body.NativeNetworkID = m.NativeNetworkID.ValueString()
 		}
-		body.TagIDs = &ids
+
+		// NetworkTagsSetting: Unknown → nil (omit); Known/Null → &value (send).
+		if !m.NetworkTagsSetting.IsUnknown() {
+			v := int(m.NetworkTagsSetting.ValueInt64())
+			body.NetworkTagsSetting = &v
+		}
+
+		// TagIDs (three-state):
+		//   Unknown → nil (omit — controller preserves current tagged VLANs)
+		//   Null    → &[]string{} (send [] — user explicitly cleared)
+		//   Known   → &ids
+		if m.TagNetworkIDs.IsUnknown() {
+			// nil — omit from JSON
+		} else if m.TagNetworkIDs.IsNull() {
+			empty := []string{}
+			body.TagIDs = &empty
+		} else {
+			var ids []string
+			d := m.TagNetworkIDs.ElementsAs(ctx, &ids, false)
+			if d.HasError() {
+				for _, e := range d.Errors() {
+					*diags = append(*diags, fmt.Errorf("%s: %s", e.Summary(), e.Detail()))
+				}
+				return nil
+			}
+			body.TagIDs = &ids
+		}
 	}
 
 	// LinkSpeed/Duplex: derive ONLY when speed is Known; Unknown → both nil (omit).
+	// Not gated on override — port speed is independent of the VLAN profile.
 	if !m.Speed.IsUnknown() && !m.Speed.IsNull() {
 		ls, dp := client.SpeedToLinkDuplex(int(m.Speed.ValueInt64()))
 		body.LinkSpeed = &ls
 		body.Duplex = &dp
-	}
-
-	operation := m.Operation.ValueString()
-	if operation == "" {
-		operation = "switching"
-	}
-	body.Operation = operation
-
-	// Override coupling: mirroring requires profileOverrideEnable=true.
-	if operation == "mirroring" {
-		body.ProfileOverrideEnable = true
 	}
 
 	if operation == "mirroring" && !m.MirroredPorts.IsNull() && !m.MirroredPorts.IsUnknown() {
@@ -410,7 +418,15 @@ func applySwitchPortToModel(ctx context.Context, m *SwitchPortResourceModel, p *
 		operation = "switching"
 	}
 	m.Operation = types.StringValue(operation)
-	m.MirroredPorts = mirroredPortRefsToSet(ctx, p.MirroredPorts)
+	// mirrored_ports is Optional (not Computed): a non-mirror port has no mirror
+	// sources, so the model must be Null — not an empty set — to match a null
+	// config. Returning an empty set here triggers "inconsistent result after
+	// apply" (planned null != applied empty-set).
+	if len(p.MirroredPorts) == 0 {
+		m.MirroredPorts = types.SetNull(types.Int64Type)
+	} else {
+		m.MirroredPorts = mirroredPortRefsToSet(ctx, p.MirroredPorts)
+	}
 
 	if len(p.TagNetworkIDs) == 0 && m.TagNetworkIDs.IsNull() {
 		m.TagNetworkIDs = types.ListNull(types.StringType)
