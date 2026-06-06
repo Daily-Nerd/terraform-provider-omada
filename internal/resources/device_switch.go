@@ -6,10 +6,8 @@ import (
 
 	"github.com/Daily-Nerd/terraform-provider-omada/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -91,72 +89,62 @@ func (r *DeviceSwitchResource) Metadata(_ context.Context, req resource.Metadata
 	resp.TypeName = req.ProviderTypeName + "_device_switch"
 }
 
+// switchPortSchema is read-only. Per-port writes are owned exclusively by the
+// omada_switch_port resource (openapi/v1 path). device_switch only observes
+// port state here so the two resources can never write the same port via
+// incompatible API surfaces. See docs: managing a port in both resources is
+// unsupported and was the source of silent VLAN drift.
 var switchPortSchema = schema.NestedAttributeObject{
 	Attributes: map[string]schema.Attribute{
 		"port": schema.Int64Attribute{
-			Description: "Port number (1-based).",
-			Required:    true,
+			Description: "Port number (1-based). Read-only.",
+			Computed:    true,
 		},
 		"name": schema.StringAttribute{
-			Description: "Port display name.",
-			Optional:    true,
+			Description: "Port display name. Read-only.",
 			Computed:    true,
 		},
 		"disable": schema.BoolAttribute{
-			Description: "Whether the port is administratively disabled.",
-			Optional:    true,
+			Description: "Whether the port is administratively disabled. Read-only.",
 			Computed:    true,
-			Default:     booldefault.StaticBool(false),
 		},
 		"profile_id": schema.StringAttribute{
-			Description: "The port profile ID assigned to this port.",
-			Optional:    true,
+			Description: "The port profile ID assigned to this port. Read-only.",
 			Computed:    true,
 		},
 		"profile_override_enable": schema.BoolAttribute{
-			Description: "Whether per-port override of the profile is enabled.",
-			Optional:    true,
+			Description: "Whether per-port override of the profile is enabled. Read-only.",
 			Computed:    true,
-			Default:     booldefault.StaticBool(false),
 		},
 		"native_network_id": schema.StringAttribute{
-			Description: "The native (untagged) network ID for this port.",
-			Optional:    true,
+			Description: "The native (untagged) network ID for this port. Read-only.",
 			Computed:    true,
 		},
 		"network_tags_setting": schema.Int64Attribute{
-			Description: "Network tags setting: 0=from profile, 1=custom.",
-			Optional:    true,
+			Description: "Network tags setting: 0=from profile, 1=custom. Read-only.",
 			Computed:    true,
 		},
 		"tag_network_ids": schema.ListAttribute{
-			Description: "List of tagged network IDs.",
-			Optional:    true,
+			Description: "List of tagged network IDs. Read-only.",
 			Computed:    true,
 			ElementType: types.StringType,
 		},
 		"untag_network_ids": schema.ListAttribute{
-			Description: "List of untagged network IDs.",
-			Optional:    true,
+			Description: "List of untagged network IDs. Read-only.",
 			Computed:    true,
 			ElementType: types.StringType,
 		},
 		"speed": schema.Int64Attribute{
-			Description: "Port speed: 0=Auto, 1=10M, 2=100M, 3=1000M.",
-			Optional:    true,
+			Description: "Port speed: 0=Auto, 1=10M, 2=100M, 3=1000M. Read-only.",
 			Computed:    true,
 		},
 		"voice_network_enable": schema.BoolAttribute{
-			Description: "Enable voice network on this port.",
-			Optional:    true,
+			Description: "Enable voice network on this port. Read-only.",
 			Computed:    true,
-			Default:     booldefault.StaticBool(false),
 		},
 		"voice_dscp_enable": schema.BoolAttribute{
-			Description: "Enable voice DSCP on this port.",
-			Optional:    true,
+			Description: "Enable voice DSCP on this port. Read-only.",
 			Computed:    true,
-			Default:     booldefault.StaticBool(false),
 		},
 	},
 }
@@ -294,10 +282,12 @@ func (r *DeviceSwitchResource) Schema(_ context.Context, _ resource.SchemaReques
 				Computed:    true,
 			},
 
-			// Ports
+			// Ports — read-only. Observed from the controller, never written here.
+			// Use the omada_switch_port resource to manage individual ports.
 			"ports": schema.ListNestedAttribute{
-				Description:  "Switch port configurations. All ports must be specified on import.",
-				Optional:     true,
+				Description: "Observed switch port configuration (read-only). " +
+					"To manage a port, use the omada_switch_port resource — a single port " +
+					"must not be managed by both resources at once.",
 				Computed:     true,
 				NestedObject: switchPortSchema,
 			},
@@ -419,34 +409,6 @@ func buildSwitchServiceConfig(plan *DeviceSwitchResourceModel) *client.SwitchSer
 	return config
 }
 
-func updateSwitchPorts(ctx context.Context, c *client.Client, siteID, mac string, plan *DeviceSwitchResourceModel, diags *diag.Diagnostics) {
-	if plan.Ports.IsNull() || plan.Ports.IsUnknown() {
-		return
-	}
-	var ports []SwitchPortModel
-	diags.Append(plan.Ports.ElementsAs(ctx, &ports, false)...)
-	if diags.HasError() {
-		return
-	}
-	for _, p := range ports {
-		portConfig := map[string]interface{}{
-			"name":                  p.Name.ValueString(),
-			"profileId":             p.ProfileID.ValueString(),
-			"profileOverrideEnable": p.ProfileOverrideEnable.ValueBool(),
-			"networkTagsSetting":    p.NetworkTagsSetting.ValueInt64(),
-			"tagNetworkIds":         []string{},
-			"untagNetworkIds":       []string{},
-		}
-		if err := c.UpdateSwitchPort(ctx, siteID, mac, int(p.Port.ValueInt64()), portConfig); err != nil {
-			diags.AddError(
-				fmt.Sprintf("Error updating switch port %d", p.Port.ValueInt64()),
-				err.Error(),
-			)
-			return
-		}
-	}
-}
-
 // Create always fails — switches must be adopted through the controller UI
 // and imported into Terraform state.
 func (r *DeviceSwitchResource) Create(_ context.Context, _ resource.CreateRequest, resp *resource.CreateResponse) {
@@ -512,10 +474,8 @@ func (r *DeviceSwitchResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	updateSwitchPorts(ctx, r.client, siteID, mac, &plan, &resp.Diagnostics)
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	// Per-port writes are owned by the omada_switch_port resource; device_switch
+	// only reads port state back. Ports are refreshed below via GetSwitchConfig.
 
 	swConfig, err := r.client.GetSwitchConfig(ctx, siteID, mac)
 	if err != nil {
